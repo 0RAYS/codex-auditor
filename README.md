@@ -15,7 +15,7 @@ docker run -d \
   -e OPENAI_BASE_URL="https://your.api.dist/v1" \
   -e PASSWORD="yourpassword" \
   -v codex-data:/data \
-  christarcher/0rays-codex-client:latest
+  rocketdev/0rays-codex-auditor:latest
 ```
 
 需要注意的是, 如果/data如果不挂载, 存储的配置会丢失.

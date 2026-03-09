@@ -63,6 +63,7 @@ COPY scripts/sudo.zsh /root/.sudo.zsh
 COPY configs/zshrc /root/.zshrc
 COPY configs/tmux.conf /root/.tmux.conf
 COPY configs/vimrc /root/.vimrc
+COPY configs/gdbinit /root/.gdbinit
 COPY vim-plugins.tar.zst /tmp/vim-plugins.tar.zst
 COPY AGENTS.md /data/codex/AGENTS.md
 RUN chmod +x /init /tmux.sh && touch /root/.bash_profile && chsh -s /usr/bin/zsh root && \

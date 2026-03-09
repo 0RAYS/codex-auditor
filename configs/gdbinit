@@ -1,0 +1,7 @@
+set debuginfod enabled on
+source /usr/share/pwndbg/gdbinit.py
+# source /opt/pwndbg/gdbinit.py
+set follow-fork-mode parent
+add-auto-load-safe-path /usr/lib/go/src/runtime/runtime-gdb.py
+
+set context-sections regs disasm code backtrace threads expressions

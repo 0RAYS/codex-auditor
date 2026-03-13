@@ -20,8 +20,7 @@ RUN pacman -Syu --noconfirm \
     net-tools iproute2 openbsd-netcat sudo rsync \
     && pacman -Scc --noconfirm
 
-# 如果这里构建有问题，就给cat heredoc后面加上反斜杠
-RUN sed -i 's/#Color/Color/' /etc/pacman.conf && \
+RUN sed -i 's/#\(Color\)/\1/;s/^\(NoProgressBar\)/#\1/' /etc/pacman.conf && \
     sed -i 's/^MAKEFLAGS=.*/MAKEFLAGS="-j"/' /etc/makepkg.conf && \
     printf '[archlinuxcn]\nInclude = /etc/pacman.d/archlinuxcn-mirrorlist\n' >> /etc/pacman.conf
 

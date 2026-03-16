@@ -1,3 +1,0 @@
-interface:
-  display_name: "Go (Non-Server) Audit"
-  short_description: "Security audit workflow for non-server Go projects"

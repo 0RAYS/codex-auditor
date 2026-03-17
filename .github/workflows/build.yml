@@ -1,4 +1,4 @@
-name: Build Audit Image
+name: Build Audit-Pwn Image
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: build-audit-image
+  group: build-audit-pwn-image
   cancel-in-progress: false
 
 jobs:

@@ -58,8 +58,23 @@ multi_agent = true
 TOML
     echo "[+] Generated $CODEX_CFG"
 else
-    sed -i "s|^base_url = .*|base_url = \"${OPENAI_BASE_URL}\"|" "$CODEX_CFG"
-    echo "[+] Updated base_url in $CODEX_CFG"
+    if [ -n "${OPENAI_BASE_URL:-}" ]; then
+        if grep -q '^base_url = ' "$CODEX_CFG" 2>/dev/null; then
+            sed -i "s|^base_url = .*|base_url = \"${OPENAI_BASE_URL}\"|" "$CODEX_CFG"
+        else
+            sed -i "/^name = \"docker-env\"$/a base_url = \"${OPENAI_BASE_URL}\"" "$CODEX_CFG"
+        fi
+        echo "[+] Updated base_url in $CODEX_CFG"
+    fi
+fi
+
+# ---- 3.1. Codex MCP servers（运行时可选）----
+if [ -n "${IDA_MCP_URL:-}" ]; then
+    codex mcp add ida --url "${IDA_MCP_URL}"
+fi
+
+if [ -n "${GHIDRA_MCP_URL:-}" ]; then
+    codex mcp add ghidra --url "${GHIDRA_MCP_URL}"
 fi
 
 # 代理（只在非空时写入）
@@ -88,6 +103,8 @@ if [ ! -f "$FB_DB" ]; then
 else
     echo "[+] filebrowser: using existing database"
 fi
+
+echo "flag{$(head -c 64 /dev/random | sha256sum - | cut -d' ' -f1)}" > /flag
 
 echo "[+] starting supervisord..."
 exec supervisord -c /etc/supervisord.conf

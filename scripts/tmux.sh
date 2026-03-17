@@ -1,5 +1,5 @@
 #!/bin/bash
-SESSION_NAME="audit"
+SESSION_NAME="${1:-pwner}"
 
 # 已经在 tmux 里了，直接给 shell
 if [ -n "${TMUX}" ]; then

@@ -1,21 +1,21 @@
-# 0RAYS Codex Auditor
+# 0RAYS Codex Pwner
 
-基于 [Codex](https://github.com/openai/codex) 的二进制（开源）代码审计 Docker 镜像
+基于 [Codex](https://github.com/openai/codex) 的二进制（闭源）代码审计 / CTF Docker 镜像
 
-这是一个**基础镜像**，预装了通用编译工具和运行环境。
+这是一个**基础镜像**，预装了通用 Pwn 工具和运行环境。
 
 ## 快速开始
 
 ```bash
 docker run -d \
-  --name binary-audit \
+  --name pwner \
   -p 8981:8981 \
   -p 8982:8982 \
   -e OPENAI_API_KEY="sk-xxx" \
   -e OPENAI_BASE_URL="https://your.api.dist/v1" \
   -e PASSWORD="yourpassword" \
   -v codex-data:/data \
-  rocketdev/0rays-codex-auditor:latest
+  rocketdev/0rays-codex-pwner:latest
 ```
 
 需要注意的是, 如果/data如果不挂载, 存储的配置会丢失.
@@ -25,6 +25,8 @@ docker run -d \
 | 方式 | 地址 |
 |---|---|
 | Web 终端 (ttyd) | `http://<host>:8981` |
+| 文件浏览器 | `http://<host>:8981/files/` |
+| 监控 ttyd (给codex用的，不要随意操作，避免影响ai判断) | `http://<host>:8981/monitor/` |
 | SSH | `ssh root@<host> -p 8982` |
 
 默认密码通过 `PASSWORD` 环境变量设置，未设置时为 `0raysnb`。
@@ -43,6 +45,8 @@ docker run -d \
 | `PROXY` | HTTP/HTTPS 代理地址 (可选) |
 | `GLOBAL_MIRROR` | 运行时是否使用自带 mirrorlist (默认换成国内源；海外建议设置以恢复官方mirrorlist) |
 | `PACMAN_NEW_KEYRING` | 设置后每次启动都生成新本地密钥，需要启用不安全的源时设置 |
+| `IDA_MCP_URL` | IDA Pro MCP Streamable HTTP URL |
+| `GHIDRA_MCP_URL` | Ghidra MCP Streamable HTTP URL |
 
 ## 目录结构
 
@@ -65,9 +69,9 @@ docker run -d \
 基于此镜像构建专属环境：
 
 ```dockerfile
-FROM rocketdev/0rays-codex-auditor:latest
+FROM rocketdev/0rays-codex-pwner:latest
 
-RUN pacman -Syu --noconfirm python-pwntools
+RUN pacman -Syu --noconfirm python-angr
 ```
 
 为控制镜像体积，不要预装过大的工具，按需现场安装

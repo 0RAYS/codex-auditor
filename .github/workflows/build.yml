@@ -24,8 +24,15 @@ jobs:
       - name: Resolve image name
         id: image
         shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
         run: |
-          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          repository="${REPOSITORY,,}"
+          branch="${BRANCH,,}"
+          branch="${branch//\//-}"
+          branch="$(printf '%s' "${branch}" | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+          echo "name=ghcr.io/${repository}-${branch}" >> "$GITHUB_OUTPUT"
 
       - name: Fetch latest Codex release
         id: codex

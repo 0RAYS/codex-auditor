@@ -1,4 +1,0 @@
-interface:
-  display_name: "Tmux Operator"
-  short_description: "Operate tmux sessions, windows, and panes."
-  default_prompt: "Use $tmux-operator to choose the right tmux commands for session management, pane control, output capture, or multi-terminal workflows."

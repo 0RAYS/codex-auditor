@@ -1,7 +1,0 @@
-interface:
-  display_name: "Pwndbg Assistant"
-  short_description: "Use Pwndbg commands and functions efficiently"
-  default_prompt: "Use $pwndbg-skill to choose the most effective Pwndbg commands and functions for this debugging task."
-
-policy:
-  allow_implicit_invocation: true

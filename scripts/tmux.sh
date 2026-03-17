@@ -3,7 +3,7 @@ SESSION_NAME="audit"
 
 # 已经在 tmux 里了，直接给 shell
 if [ -n "${TMUX}" ]; then
-    exec zsh --login
+    exec bash --login
 fi
 
 # 清理 dead session 并 attach 或新建

@@ -1,4 +1,4 @@
-# 0RAYS Codex Pwner
+# Codex Pwner
 
 基于 [Codex](https://github.com/openai/codex) 的二进制（闭源）代码审计 / CTF Docker 镜像
 
@@ -15,7 +15,7 @@ docker run -d \
   -e OPENAI_BASE_URL="https://your.api.dist/v1" \
   -e PASSWORD="yourpassword" \
   -v codex-data:/data \
-  rocketdev/0rays-codex-pwner:latest
+  ghcr.io/0rays/codex-auditor-pwn:latest
 ```
 
 需要注意的是, 如果/data如果不挂载, 存储的配置会丢失.
@@ -69,7 +69,7 @@ docker run -d \
 基于此镜像构建专属环境：
 
 ```dockerfile
-FROM rocketdev/0rays-codex-pwner:latest
+FROM ghcr.io/0rays/codex-auditor-pwn:latest
 
 RUN pacman -Syu --noconfirm python-angr
 ```

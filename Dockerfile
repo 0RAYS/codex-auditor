@@ -5,7 +5,6 @@ LABEL description="Codex-based code audit / CTF workstation"
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.ustc.edu.cn@g; s@//.*security.ubuntu.com@//mirrors.ustc.edu.cn@g' /etc/apt/sources.list.d/*
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # 基础
     ca-certificates wget curl git openssh-server tmux locales xxd ttyd nginx \
@@ -37,58 +36,54 @@ RUN locale-gen zh_CN.UTF-8 && update-locale LANG=zh_CN.UTF-8
 
 COPY scripts/nginx.conf /etc/nginx/nginx.conf
 
-# 4. 包管理源配置
-RUN npm config set registry https://registry.npmmirror.com && \
-    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple; true
-
-# 5. Codex
+# 4. Codex
 RUN npm i -g @openai/codex@latest
 
-# 6. Python 常用库 & 审计工具
+# 5. Python 常用库 & 审计工具
 RUN pip install --break-system-packages --no-cache-dir \
     requests \
     beautifulsoup4 \
     semgrep
 
-# 7. 目录结构
+# 6. 目录结构
 # 根据官方文档, /etc/codex/skills用来存储skills
 RUN mkdir -p /data/workspace /data/codex /data/tools /data/skills /etc/codex
 RUN ln -sfn /data/codex/ /root/.codex
 RUN ln -sfn /data/skills/ /etc/codex/skills
 
-# 8a. 下载审计工具
+# 7a. 下载审计工具
 ADD https://github.com/frohoff/ysoserial/releases/download/v0.0.6/ysoserial-all.jar \
     /data/tools/ysoserial.jar
 
-# 8b. 安装 PHP Composer
+# 7b. 安装 PHP Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/bin --filename=composer
 
-# 8c. 手动构建完工具目录后复制进容器
+# 7c. 手动构建完工具目录后复制进容器
 COPY tools/ /data/tools/
 COPY skills/ /data/skills/
 
-# 9. SSH 配置
+# 8. SSH 配置
 RUN mkdir -p /run/sshd && \
     sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/^#*Port .*/Port 8982/' /etc/ssh/sshd_config && \
     ssh-keygen -A
 
-# 10. 脚本 & 配置文件
+# 9. 脚本 & 配置文件
 COPY scripts/start.sh /start.sh
 COPY scripts/tmux.sh /tmux.sh
 COPY AGENTS.md /data/codex/AGENTS.md
 RUN chmod +x /start.sh /tmux.sh
 
-# 11. .bashrc 注入
+# 10. .bashrc 注入
 RUN sed -i '1i\# Auto-attach tmux\nif [[ $- == *i* ]] && [ -z "${TMUX}" ]; then\n    exec /tmux.sh\nfi\n' /root/.bashrc && \
     echo '[ -f /etc/audit-env ] && source /etc/audit-env' >> /root/.bashrc && \
     echo '[ -f /data/custom.sh ] && source /data/custom.sh' >> /root/.bashrc
 
-# 12. 清理
+# 11. 清理
 RUN apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && history -c 2>/dev/null; true
 
-# 13. 写入history便于使用
+# 12. 写入history便于使用
 RUN echo 'codex --dangerously-bypass-approvals-and-sandbox' > /root/.bash_history
 
 # 元数据

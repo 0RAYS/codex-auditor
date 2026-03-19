@@ -62,6 +62,8 @@ else
     echo "[+] Updated base_url in $CODEX_CFG"
 fi
 
+unset OPENAI_BASE_URL
+
 # 代理（只在非空时写入）
 if [ -n "${PROXY:-}" ]; then
     cat >> "$ENV_FILE" << EOF

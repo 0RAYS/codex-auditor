@@ -42,7 +42,7 @@ COPY scripts/yay.sh /usr/local/sbin/yay
 RUN chmod +x /usr/local/sbin/yay
 
 # 3) 额外二进制工具
-ADD https://github.com/SaladDay/cc-switch-cli/releases/download/v4.7.0/cc-switch-cli-linux-x64-musl.tar.gz /tmp/ccs.tar.gz
+ADD https://github.com/SaladDay/cc-switch-cli/releases/download/v5.8.1/cc-switch-cli-linux-x64-musl.tar.gz /tmp/ccs.tar.gz
 ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64 /usr/bin/tini
 RUN tar -xzf /tmp/ccs.tar.gz -C /usr/bin cc-switch && rm /tmp/ccs.tar.gz && chmod +x /usr/bin/tini
 

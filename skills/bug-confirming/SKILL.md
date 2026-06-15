@@ -28,3 +28,13 @@ description: 验证、定级、复现并打包二进制漏洞候选。用于已�
 4. 不要止步于不可利用的低危漏洞。优先推进可能导致 RCE 的高价值漏洞。
 
 5. 如果没有确认有价值漏洞，返回 `$bug-hunting` 继续挖掘新候选。
+
+## `known_findings.md` 填写参考
+
+`./archives/known_findings.md` 保持为仅含表头的固定四列表格；不要在模板或实际归档中保留参考行。追加确认结果时使用如下格式：
+
+```markdown
+| 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- |
+| 在默认浅层校验下，RESTORE 接受了损坏的哈希 listpack，随后 HGETALL 在 lpAssertValidEntry 中中止崩溃。(该条仅作编写表格的参考) | crash | medium | src/rdb.c#L3254::rdbLoadObject. src/listpack.c#L1697::lpAssertValidEntry |
+```

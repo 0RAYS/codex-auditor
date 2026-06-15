@@ -45,6 +45,8 @@ const els = {
   toast: document.getElementById("toast"),
 };
 
+const acknowledgingInterventions = new Set();
+
 function api(path, options = {}) {
   const headers = options.headers || {};
   if (options.body && !(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
@@ -92,7 +94,13 @@ function isBusySession(session) {
 }
 
 function sessionDisplayTitle(session) {
-  return `${session.session_type} · ${session.status}`;
+  const name = (session.name || "").trim();
+  if (!name || name === session.session_type) return session.session_type;
+  return `${session.session_type} · ${name}`;
+}
+
+function sessionSidebarTitle(session) {
+  return session.session_type === "mining" ? "mining" : "debug";
 }
 
 function setSelected(targetId, sessionId, persist = true) {
@@ -139,7 +147,17 @@ function renderTree() {
     select.innerHTML = `<span class="target-dot"></span><span class="target-title"></span><span class="target-meta"></span>`;
     select.querySelector(".target-title").textContent = target.name;
     const sessionCount = (target.sessions || []).length;
-    select.querySelector(".target-meta").textContent = `${sessionCount} session${sessionCount === 1 ? "" : "s"}`;
+    const schedulerLabel = target.auto_mining_state === "frozen" ? "冻结" : "运行";
+    select.querySelector(".target-meta").textContent = `${schedulerLabel} · ${sessionCount} session${sessionCount === 1 ? "" : "s"}`;
+
+    const scheduler = document.createElement("button");
+    scheduler.type = "button";
+    const frozen = target.auto_mining_state === "frozen";
+    scheduler.className = `tree-icon${frozen ? " target-resume" : ""}`;
+    scheduler.title = frozen ? "恢复自动挖掘" : "冻结自动挖掘";
+    scheduler.setAttribute("aria-label", scheduler.title);
+    scheduler.innerHTML = iconSvg(frozen ? "play" : "snowflake");
+    scheduler.addEventListener("click", () => toggleTargetScheduler(target));
 
     const add = document.createElement("button");
     add.type = "button";
@@ -165,19 +183,31 @@ function renderTree() {
     remove.innerHTML = iconSvg("x");
     remove.addEventListener("click", () => deleteTarget(target));
 
-    row.append(select, add, edit, remove);
+    row.append(select, scheduler, add, edit, remove);
     group.appendChild(row);
 
     const sessions = document.createElement("div");
     sessions.className = "session-children";
     (target.sessions || []).forEach((session) => {
-      const item = document.createElement("button");
-      item.type = "button";
+      const item = document.createElement("div");
       item.className = `session-leaf${Number(session.id) === Number(state.selectedSessionId) ? " active" : ""}`;
-      item.addEventListener("click", () => setSelected(target.id, session.id));
-      const statusClass = session.status === "running" ? " running" : "";
-      item.innerHTML = `<span class="session-text"></span><span class="status-dot${statusClass}"></span>`;
-      item.querySelector(".session-text").textContent = sessionDisplayTitle(session);
+      const selectSession = document.createElement("button");
+      selectSession.type = "button";
+      selectSession.className = "session-select";
+      selectSession.addEventListener("click", () => setSelected(target.id, session.id));
+      selectSession.innerHTML = '<span class="session-text"></span>';
+      selectSession.querySelector(".session-text").textContent = sessionSidebarTitle(session);
+
+      const status = document.createElement("button");
+      status.type = "button";
+      status.className = `session-status ${session.status || "finished"}`;
+      const deletable = session.status !== "running";
+      status.disabled = !deletable;
+      status.title = deletable ? "删除 session" : "running session 不能删除";
+      status.setAttribute("aria-label", status.title);
+      if (deletable) status.addEventListener("click", () => deleteSession(session));
+
+      item.append(selectSession, status);
       sessions.appendChild(item);
     });
     group.appendChild(sessions);
@@ -222,6 +252,13 @@ function renderMessages() {
     const content = document.createElement("div");
     content.textContent = `${kind}${message.content}`;
     bubble.appendChild(content);
+    const timestamp = messageTimestamp(message);
+    if (timestamp) {
+      const meta = document.createElement("div");
+      meta.className = "message-time";
+      meta.textContent = timestamp;
+      bubble.appendChild(meta);
+    }
     item.appendChild(bubble);
     els.messages.appendChild(item);
   });
@@ -229,22 +266,27 @@ function renderMessages() {
   if (nearBottom) els.messages.scrollTop = els.messages.scrollHeight;
 }
 
+function messageTimestamp(message) {
+  if (!["user", "assistant"].includes(message.role) || !message.created_at) return "";
+  return formatTimestamp(message.created_at);
+}
+
+function formatTimestamp(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (number) => String(number).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-") + ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 function normalizeVisibleMessages(messages) {
-  const visible = messages.filter(
+  return messages.filter(
     (message) => ["user", "assistant", "system"].includes(message.role)
       && !["run", "vulnerability", "tool_call", "event"].includes(message.kind),
   );
-  return visible.reduce((result, message) => {
-    const previous = result[result.length - 1];
-    const isAssistantMessage = message.role === "assistant" && (!message.kind || message.kind === "message");
-    const wasAssistantMessage = previous?.role === "assistant" && (!previous.kind || previous.kind === "message");
-    if (isAssistantMessage && wasAssistantMessage) {
-      result[result.length - 1] = message;
-    } else {
-      result.push(message);
-    }
-    return result;
-  }, []);
 }
 
 function appendThinkingMessage(session) {
@@ -431,6 +473,7 @@ async function loadState() {
   }
   renderTree();
   renderChatShell();
+  showInterventionNotices();
   resetVulnerabilities();
   await loadVulnerabilities();
 }
@@ -446,10 +489,41 @@ async function refreshStateOnly() {
   }
   renderTree();
   renderChatShell();
+  showInterventionNotices();
   if (Number(previousSession) !== Number(state.selectedSessionId)) {
     resetVulnerabilities();
     await loadVulnerabilities();
   }
+}
+
+async function toggleTargetScheduler(target) {
+  const next = target.auto_mining_state === "frozen" ? "running" : "frozen";
+  try {
+    await api(`/targets/${target.id}/scheduler-state`, { method: "PATCH", body: { state: next } });
+    await refreshStateOnly();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function showInterventionNotices() {
+  state.targets.forEach((target) => {
+    if (!target.intervention_required || target.intervention_notice_read) return;
+    if (acknowledgingInterventions.has(target.id)) return;
+    acknowledgingInterventions.add(target.id);
+    window.setTimeout(async () => {
+      const reason = target.intervention_reason || "未提供原因";
+      window.alert(`目标 ${target.name} 需要人为介入：\n${reason}`);
+      try {
+        await api(`/targets/${target.id}/intervention/ack`, { method: "POST" });
+        await refreshStateOnly();
+      } catch (error) {
+        showToast(error.message);
+      } finally {
+        acknowledgingInterventions.delete(target.id);
+      }
+    }, 0);
+  });
 }
 
 async function poll() {
@@ -532,9 +606,52 @@ async function deleteTarget(target) {
   }
 }
 
+async function deleteSession(session) {
+  if (session.status === "running") return;
+  const confirmed = window.confirm(`确定删除 session ${sessionDisplayTitle(session)}？这会删除该 session 的消息和运行记录。`);
+  if (!confirmed) return;
+  try {
+    await api(`/sessions/${session.id}`, { method: "DELETE" });
+    if (Number(state.selectedSessionId) === Number(session.id)) {
+      state.selectedSessionId = null;
+      state.messages = [];
+    }
+    await loadState();
+    await loadMessages();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 function iconSvg(name) {
+  if (name === "snowflake") {
+    return `
+      <svg class="button-icon" xmlns="http://w3.org" viewBox="-70 -70 140 140" aria-hidden="true">
+        <defs>
+          <path id="branch" d="M 0,0 L 0,-60 M 0,-35 L 20,-52 M 0,-35 L -20,-52" />
+        </defs>
+        <style>
+          .flake {
+            stroke: #00b4d8;
+            stroke-width: 4;
+            stroke-linecap: round;
+            fill: none;
+          }
+        </style>
+        <g class="flake">
+          <use href="#branch" transform="rotate(0)" />
+          <use href="#branch" transform="rotate(60)" />
+          <use href="#branch" transform="rotate(120)" />
+          <use href="#branch" transform="rotate(180)" />
+          <use href="#branch" transform="rotate(240)" />
+          <use href="#branch" transform="rotate(300)" />
+        </g>
+      </svg>
+    `;
+  }
   const paths = {
     plus: '<path d="M12 5v14M5 12h14"></path>',
+    play: '<path d="M8 5.5v13l10-6.5-10-6.5Z" fill="currentColor" stroke="none"></path>',
     settings: '<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path>',
     x: '<path d="m6 6 12 12M18 6 6 18"></path>',
     wrench: '<path d="M14.7 6.3a4 4 0 0 0-5-5L12 3.6 9.6 6 7.3 3.7a4 4 0 0 0 5 5L20 16.4a2.1 2.1 0 0 1-3 3l-7.7-7.7"></path>',

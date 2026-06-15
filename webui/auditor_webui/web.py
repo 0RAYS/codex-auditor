@@ -16,10 +16,10 @@ from werkzeug.exceptions import HTTPException
 from .codex_runner import expand_note_sync, start_agent_run, stop_agent_run
 from .config import CONFIG
 from .database import (
-    add_message,
     connect_db,
     create_debug_session,
     create_target_with_default_session,
+    delete_session,
     delete_target,
     get_existing_session,
     get_existing_target,
@@ -27,12 +27,18 @@ from .database import (
     init_db,
     list_messages,
     list_state_tree,
+    mark_intervention_detected,
+    mark_intervention_notice_read,
+    mark_target_mining_sessions_error,
+    running_auto_mining_session_ids,
     set_setting,
+    update_target_auto_mining_state,
     update_target_note,
 )
 from .schema import BUSY_STATUSES, JsonObject, JsonValue, row_int, row_str
+from .scheduler import intervention_path, read_intervention_reason, start_scheduler
 from .vulnerabilities import read_vulnerabilities, unavailable_payload, update_vulnerability_rating
-from .workspace import delete_target_workspace, prepare_target_workspace, validate_target_name, write_init_note
+from .workspace import delete_target_workspace, prepare_target_workspace, validate_target_name
 
 
 def json_response(payload: Mapping[str, object], status: int = 200) -> tuple[Response, int]:
@@ -142,10 +148,9 @@ def create_app() -> Flask:
         except Exception:
             delete_target_workspace(workspace_path)
             raise
-        prompt = row_str(session, "prompt") or "请阅读 init.md，完成目标初始化并开始挖掘漏洞。"
         session_id = row_int(session, "id")
-        add_message(session_id, "user", prompt)
-        start_agent_run(session_id, prompt, source="system")
+        start_agent_run(session_id, row_str(session, "prompt"), source="scheduler")
+        session = get_existing_session(session_id)
         return json_response({"ok": True, "target": target, "session": session}, 201)
 
     @app.get("/api/targets/<int:target_id>")
@@ -160,9 +165,32 @@ def create_app() -> Flask:
         if unexpected:
             raise ValueError(f"不支持的字段: {', '.join(sorted(unexpected))}")
         note = str(payload.get("note", row_str(target, "note"))).strip()
-        write_init_note(Path(row_str(target, "workspace_path")), note)
         updated = update_target_note(target_id, note)
         return json_response({"ok": True, "target": updated})
+
+    @app.patch("/api/targets/<int:target_id>/scheduler-state")
+    def api_update_target_scheduler_state(target_id: int) -> ResponseReturnValue:
+        payload = request_json()
+        state = str(payload.get("state", "")).strip()
+        if state not in {"running", "frozen"}:
+            raise ValueError("state 只能是 running 或 frozen")
+        return json_response({"ok": True, "target": update_target_auto_mining_state(target_id, state)})
+
+    @app.patch("/api/targets/<int:target_id>/intervention")
+    def api_trigger_intervention(target_id: int) -> ResponseReturnValue:
+        target = get_existing_target(target_id)
+        path = intervention_path(target)
+        reason = read_intervention_reason(path) if path.exists() else "未提供原因"
+        running_session_ids = running_auto_mining_session_ids(target_id)
+        updated = mark_intervention_detected(target_id, reason)
+        mark_target_mining_sessions_error(target_id, reason)
+        for session_id in running_session_ids:
+            stop_agent_run(session_id, mark_error=True)
+        return json_response({"ok": True, "target": updated})
+
+    @app.post("/api/targets/<int:target_id>/intervention/ack")
+    def api_ack_intervention(target_id: int) -> ResponseReturnValue:
+        return json_response({"ok": True, "target": mark_intervention_notice_read(target_id)})
 
     @app.delete("/api/targets/<int:target_id>")
     def api_delete_target(target_id: int) -> ResponseReturnValue:
@@ -196,7 +224,6 @@ def create_app() -> Flask:
         start = bool(payload.get("start", bool(prompt)))
         if prompt and start:
             session_id = row_int(session, "id")
-            add_message(session_id, "user", prompt)
             start_agent_run(session_id, prompt, source="user")
         return json_response({"ok": True, "session": session}, 201)
 
@@ -224,6 +251,11 @@ def create_app() -> Flask:
         after = int(request.args.get("after", "0"))
         return json_response({"ok": True, "messages": list_messages(session_id, after_id=after)})
 
+    @app.delete("/api/sessions/<int:session_id>")
+    def api_delete_session(session_id: int) -> ResponseReturnValue:
+        delete_session(session_id)
+        return json_response({"ok": True})
+
     @app.post("/api/sessions/<int:session_id>/messages")
     def api_send_message(session_id: int) -> ResponseReturnValue:
         session = get_existing_session(session_id)
@@ -233,7 +265,6 @@ def create_app() -> Flask:
         content = str(payload.get("content", "")).strip()
         if not content:
             raise ValueError("消息不能为空")
-        add_message(session_id, "user", content)
         started = start_agent_run(session_id, content, source="user")
         if not started:
             raise ValueError("当前会话已有运行中的 Codex 任务")
@@ -250,7 +281,6 @@ def create_app() -> Flask:
         if row_str(session, "status") in BUSY_STATUSES:
             raise ValueError("当前会话已有运行中的任务")
         prompt = "请检查并修复 ./archives/known_findings.md，使其符合固定四列 Markdown 表格协议。"
-        add_message(session_id, "user", prompt)
         start_agent_run(session_id, prompt, source="user")
         return json_response({"ok": True})
 
@@ -259,6 +289,7 @@ def create_app() -> Flask:
 
 def create_wsgi_app() -> Flask:
     init_db()
+    start_scheduler()
     return create_app()
 
 

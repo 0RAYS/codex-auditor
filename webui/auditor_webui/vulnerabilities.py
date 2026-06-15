@@ -35,6 +35,8 @@ def read_vulnerabilities(target: RowDict) -> JsonObject:
     rows = parse_findings_table(text)
     findings: list[JsonValue] = []
     for row in rows:
+        if is_reference_finding(row["cells"]):
+            continue
         rating = row["cells"][2].strip().lower()
         findings.append(
             {
@@ -116,6 +118,20 @@ def parse_findings_table(text: str) -> list[FindingRow]:
             },
         )
     return rows
+
+
+def is_reference_finding(cells: list[str]) -> bool:
+    marker_text = " ".join(cells).lower()
+    return any(
+        marker in marker_text
+        for marker in (
+            "仅作编写表格的参考",
+            "参考示例",
+            "示例行",
+            "example finding",
+            "reference finding",
+        )
+    )
 
 
 def parse_row(line: str) -> list[str]:

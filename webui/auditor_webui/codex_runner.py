@@ -20,6 +20,7 @@ from .database import (
     get_session,
     now_iso,
     set_run_event_log_path,
+    target_has_auto_mining_run,
     update_run_result,
     upsert_assistant_message,
 )
@@ -28,12 +29,14 @@ from .schema import (
     BUSY_STATUSES,
     JsonObject,
     JsonValue,
+    row_int,
     row_optional_str,
     row_str,
 )
 
 ACTIVE_RUNS: dict[int, subprocess.Popen[str]] = {}
 STOP_REQUESTS: set[int] = set()
+ERROR_STOP_REQUESTS: set[int] = set()
 ACTIVE_LOCK = threading.Lock()
 
 
@@ -61,10 +64,12 @@ def load_env_file(path: Path = Path("/etc/audit-env")) -> dict[str, str]:
     return env
 
 
-def codex_env() -> dict[str, str]:
+def codex_env(target_id: int | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env.update({key: value for key, value in load_env_file().items() if value})
     env["CODEX_HOME"] = str(CONFIG.codex_home)
+    if target_id is not None:
+        env["AUDITOR_TARGET_ID"] = str(target_id)
     return env
 
 
@@ -139,6 +144,71 @@ def write_json_event_log(log_file: Path, line: str) -> None:
             handle.write("\n")
 
 
+def tail_lines(path: Path, limit: int = 80) -> list[str]:
+    if not path.exists():
+        return []
+    return path.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]
+
+
+def extract_event_error_strings(value: JsonValue, *, event_is_error: bool = False) -> list[tuple[str, str]]:
+    fragments: list[tuple[str, str]] = []
+    if isinstance(value, dict):
+        value_type = str(value.get("type", "")).lower()
+        nested_is_error = event_is_error or any(marker in value_type for marker in ("error", "fail", "stderr"))
+        for key, item in value.items():
+            lowered = key.lower()
+            if isinstance(item, str) and item.strip():
+                if lowered in {"stderr", "stdout", "error", "output"} or (nested_is_error and lowered == "message"):
+                    fragments.append((lowered, item.strip()))
+            elif isinstance(item, dict | list):
+                fragments.extend(extract_event_error_strings(cast(JsonValue, item), event_is_error=nested_is_error))
+    elif isinstance(value, list):
+        for item in value:
+            fragments.extend(extract_event_error_strings(item, event_is_error=event_is_error))
+    return fragments
+
+
+def nonzero_exit_message(
+    *,
+    returncode: int,
+    error: str | None,
+    output_message: str,
+    log_file: Path,
+) -> str:
+    fragments: list[tuple[str, str]] = []
+    if error:
+        fragments.append(("error", error))
+    if output_message:
+        fragments.append(("output", output_message))
+    for line in tail_lines(log_file):
+        try:
+            event = cast(JsonValue, json.loads(line))
+        except json.JSONDecodeError:
+            if line.strip():
+                fragments.append(("event", line.strip()))
+            continue
+        fragments.extend(extract_event_error_strings(event))
+
+    seen: set[tuple[str, str]] = set()
+    deduped: list[tuple[str, str]] = []
+    for source, text in fragments:
+        item = (source, truncate(text, 600))
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+        if len(deduped) >= 6:
+            break
+
+    lines = [f"Codex 主 agent 返回非零状态 {returncode}。"]
+    if deduped:
+        lines.append("可提取的错误片段:")
+        lines.extend(f"- {source}: {text}" for source, text in deduped)
+    else:
+        lines.append("未提取到 stderr/stdout/event/output 错误片段。")
+    return "\n".join(lines)
+
+
 def discover_latest_session_id(start_time: float) -> str | None:
     sessions_dir = CONFIG.codex_home / "sessions"
     if not sessions_dir.exists():
@@ -193,23 +263,37 @@ def start_agent_run(session_id: int, prompt: str, *, source: str) -> bool:
         if session_id in ACTIVE_RUNS:
             return False
         STOP_REQUESTS.discard(session_id)
+        ERROR_STOP_REQUESTS.discard(session_id)
     session = get_session(session_id)
     if not session:
         raise KeyError("会话不存在")
     if row_str(session, "status") in BUSY_STATUSES:
         return False
+    if source == "scheduler" and row_str(session, "status") == "pause":
+        return False
+
+    automatic_mining = source in {"scheduler", "system"} and row_str(session, "session_type") == "mining"
+    rendered_prompt = base_prompt(
+        session,
+        prompt,
+        source=source,
+        first_auto_mining=automatic_mining and not target_has_auto_mining_run(row_int(session, "target_id")),
+    ).strip()
+    if not rendered_prompt:
+        raise ValueError("prompt 不能为空")
 
     started_at = now_iso()
     run_id = create_run(
         session_id=session_id,
         source=source,
-        prompt=prompt,
+        prompt=rendered_prompt,
         model=CONFIG.main_model,
         started_at=started_at,
         codex_session_id_before=row_optional_str(session, "codex_session_id"),
     )
+    add_message(session_id, "user", rendered_prompt)
 
-    thread = threading.Thread(target=agent_worker, args=(session_id, run_id, prompt), daemon=True)
+    thread = threading.Thread(target=agent_worker, args=(session_id, run_id, rendered_prompt), daemon=True)
     thread.start()
     return True
 
@@ -219,8 +303,6 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
     if not session:
         return
     start_time = time.time()
-    first_turn = not bool(row_optional_str(session, "codex_session_id"))
-    rendered_prompt = base_prompt(session, prompt, first_turn=first_turn)
     workspace = Path(row_str(session, "target_workspace_path", str(CONFIG.workspace)))
     output_file = CONFIG.temp_dir / f"last-{run_id}.txt"
     log_file = CONFIG.temp_dir / f"events-{run_id}.jsonl"
@@ -237,6 +319,7 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
     assistant_messages: list[str] = []
     assistant_message_id: int | None = None
     stop_requested = False
+    error_stop_requested = False
     try:
         proc = subprocess.Popen(
             cmd,
@@ -245,14 +328,14 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
             stderr=subprocess.STDOUT,
             text=True,
             cwd=str(workspace),
-            env=codex_env(),
+            env=codex_env(row_int(session, "target_id")),
             bufsize=1,
         )
         with ACTIVE_LOCK:
             ACTIVE_RUNS[session_id] = proc
         if proc.stdin is None or proc.stdout is None:
             raise RuntimeError("Codex 子进程管道未创建")
-        proc.stdin.write(rendered_prompt)
+        proc.stdin.write(prompt)
         proc.stdin.close()
 
         for line in proc.stdout:
@@ -268,7 +351,8 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
                 message = extract_assistant_message(event)
                 if message:
                     assistant_messages.append(message)
-                    assistant_message_id = upsert_assistant_message(session_id, assistant_message_id, message)
+                    running_message = "\n\n".join(assistant_messages)
+                    assistant_message_id = upsert_assistant_message(session_id, assistant_message_id, running_message)
         returncode = proc.wait()
     except OSError as exc:
         error = f"无法启动 codex: {exc}"
@@ -280,18 +364,23 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
         with ACTIVE_LOCK:
             ACTIVE_RUNS.pop(session_id, None)
             stop_requested = session_id in STOP_REQUESTS
+            error_stop_requested = session_id in ERROR_STOP_REQUESTS
             STOP_REQUESTS.discard(session_id)
+            ERROR_STOP_REQUESTS.discard(session_id)
 
     finalize_agent_run(
         session_id=session_id,
         run_id=run_id,
         output_file=output_file,
         assistant_messages=assistant_messages,
+        assistant_message_id=assistant_message_id,
         discovered_session_id=discovered_session_id,
         start_time=start_time,
+        log_file=log_file,
         returncode=returncode,
         error=error,
         stop_requested=stop_requested,
+        error_stop_requested=error_stop_requested,
     )
 
 
@@ -301,33 +390,75 @@ def finalize_agent_run(
     run_id: int,
     output_file: Path,
     assistant_messages: list[str],
+    assistant_message_id: int | None,
     discovered_session_id: str | None,
     start_time: float,
+    log_file: Path,
     returncode: int,
     error: str | None,
     stop_requested: bool,
+    error_stop_requested: bool = False,
 ) -> None:
     output_message = ""
     if output_file.exists():
         output_message = output_file.read_text(encoding="utf-8", errors="ignore").strip()
-    last_message = assistant_messages[-1] if assistant_messages else output_message
+    running_message = "\n\n".join(assistant_messages)
+    final_message = output_message or running_message
+    last_message = final_message
     if not discovered_session_id:
         discovered_session_id = discover_latest_session_id(start_time)
 
     ended_at = now_iso()
-    if output_message and not assistant_messages:
-        add_message(session_id, "assistant", output_message)
-    interrupted = stop_requested or returncode == -signal.SIGTERM
-    if error and not interrupted:
-        add_message(session_id, "system", error, "error")
-    elif returncode and returncode != 0 and not interrupted:
-        add_message(session_id, "system", f"Codex 主 agent 返回非零状态 {returncode}。", "error")
+    if final_message:
+        if assistant_message_id is not None:
+            upsert_assistant_message(session_id, assistant_message_id, final_message, touch_created_at=True)
+        else:
+            add_message(session_id, "assistant", final_message)
+    interrupted = returncode < 0
+    if error and not stop_requested and not interrupted:
+        add_message(
+            session_id,
+            "system",
+            nonzero_exit_message(
+                returncode=returncode,
+                error=error,
+                output_message=output_message,
+                log_file=log_file,
+            ),
+            "error",
+        )
+    elif returncode and returncode != 0 and not stop_requested and not interrupted:
+        add_message(
+            session_id,
+            "system",
+            nonzero_exit_message(
+                returncode=returncode,
+                error=error,
+                output_message=output_message,
+                log_file=log_file,
+            ),
+            "error",
+        )
 
-    last_error = error or (None if interrupted else (f"Codex 返回状态 {returncode}" if returncode else None))
+    if error_stop_requested:
+        status = "error"
+        last_error = error or "运行被系统停止"
+    elif stop_requested:
+        status = "pause"
+        last_error = None
+    elif returncode == 0:
+        status = "finished"
+        last_error = None
+    elif interrupted:
+        status = "interrupted"
+        last_error = error or "Codex 运行被异常中断"
+    else:
+        status = "error"
+        last_error = error or f"Codex 返回状态 {returncode}"
     update_run_result(
         session_id=session_id,
         run_id=run_id,
-        status="completed" if returncode == 0 else ("interrupted" if interrupted else "failed"),
+        status=status,
         returncode=returncode,
         ended_at=ended_at,
         codex_session_id_after=discovered_session_id,
@@ -337,13 +468,15 @@ def finalize_agent_run(
     )
 
 
-def stop_agent_run(session_id: int) -> bool:
+def stop_agent_run(session_id: int, *, mark_error: bool = False) -> bool:
     with ACTIVE_LOCK:
         proc = ACTIVE_RUNS.get(session_id)
     if not proc or proc.poll() is not None:
         return False
     with ACTIVE_LOCK:
         STOP_REQUESTS.add(session_id)
+        if mark_error:
+            ERROR_STOP_REQUESTS.add(session_id)
     proc.send_signal(signal.SIGTERM)
     return True
 

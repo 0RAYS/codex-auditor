@@ -10,8 +10,6 @@ from pathlib import Path
 
 from .config import CONFIG, TARGET_NAME_RE, target_workspace
 
-NOTE_HEADING = "## 补充说明"
-
 
 def validate_target_name(value: str) -> str:
     name = value
@@ -22,14 +20,13 @@ def validate_target_name(value: str) -> str:
     return name
 
 
-def prepare_target_workspace(name: str, note: str) -> Path:
+def prepare_target_workspace(name: str, _note: str) -> Path:
     workspace = target_workspace(validate_target_name(name))
     if workspace.exists():
         raise ValueError("目标工作区目录已存在")
     if not CONFIG.templates_dir.exists():
         raise FileNotFoundError(f"模板目录不存在: {CONFIG.templates_dir}")
     shutil.copytree(CONFIG.templates_dir, workspace)
-    write_init_note(workspace, note)
     return workspace
 
 
@@ -47,34 +44,6 @@ def delete_target_workspace(workspace: Path) -> None:
         if not resolved.is_dir():
             raise ValueError("目标工作区路径不是目录")
         shutil.rmtree(resolved)
-
-
-def write_init_note(workspace: Path, note: str) -> None:
-    init_path = workspace / "init.md"
-    text = init_path.read_text(encoding="utf-8", errors="ignore") if init_path.exists() else f"{NOTE_HEADING}\n"
-    updated = replace_note_section(text, note)
-    atomic_write_text(init_path, updated)
-
-
-def replace_note_section(text: str, note: str) -> str:
-    lines = text.splitlines()
-    heading_index = next((index for index, line in enumerate(lines) if line.strip() == NOTE_HEADING), None)
-    note_lines = note.rstrip().splitlines()
-    if heading_index is None:
-        base = text.rstrip()
-        prefix = f"{base}\n\n" if base else ""
-        return f"{prefix}{NOTE_HEADING}\n{note.rstrip()}\n"
-
-    end_index = len(lines)
-    for index in range(heading_index + 1, len(lines)):
-        line = lines[index]
-        if line.startswith("## ") and line.strip() != NOTE_HEADING:
-            end_index = index
-            break
-
-    replacement = [NOTE_HEADING, *note_lines]
-    updated_lines = [*lines[:heading_index], *replacement, *lines[end_index:]]
-    return "\n".join(updated_lines).rstrip() + "\n"
 
 
 def atomic_write_text(path: Path, text: str) -> None:

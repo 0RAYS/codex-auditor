@@ -17,6 +17,12 @@ TARGET_COLUMNS = {
     "note",
     "workspace_path",
     "color_index",
+    "auto_mining_state",
+    "consecutive_nonzero_exit_count",
+    "last_nonzero_exit_reason",
+    "intervention_required",
+    "intervention_reason",
+    "intervention_notice_read",
     "created_at",
     "updated_at",
 }
@@ -89,11 +95,15 @@ def init_db() -> None:
         set_default_setting(conn, "selected_target_id", "")
         set_default_setting(conn, "selected_session_id", "")
         timestamp = now_iso()
-        conn.execute("UPDATE sessions SET status = 'idle' WHERE status = 'running'")
+        conn.execute("UPDATE sessions SET status = 'interrupted', updated_at = ? WHERE status = 'running'", (timestamp,))
+        conn.execute("UPDATE sessions SET status = 'finished' WHERE status IN ('idle', 'completed')")
+        conn.execute("UPDATE sessions SET status = 'error' WHERE status = 'failed'")
         conn.execute(
             "UPDATE runs SET status = 'interrupted', ended_at = ? WHERE status = 'running'",
             (timestamp,),
         )
+        conn.execute("UPDATE runs SET status = 'finished' WHERE status = 'completed'")
+        conn.execute("UPDATE runs SET status = 'error' WHERE status = 'failed'")
 
 
 def schema_needs_rebuild(conn: sqlite3.Connection) -> bool:
@@ -137,6 +147,12 @@ def create_current_tables(conn: sqlite3.Connection, suffix: str = "") -> None:
             note TEXT NOT NULL DEFAULT '',
             workspace_path TEXT NOT NULL UNIQUE,
             color_index INTEGER NOT NULL DEFAULT 0,
+            auto_mining_state TEXT NOT NULL DEFAULT 'running',
+            consecutive_nonzero_exit_count INTEGER NOT NULL DEFAULT 0,
+            last_nonzero_exit_reason TEXT NOT NULL DEFAULT '',
+            intervention_required INTEGER NOT NULL DEFAULT 0,
+            intervention_reason TEXT NOT NULL DEFAULT '',
+            intervention_notice_read INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -148,7 +164,7 @@ def create_current_tables(conn: sqlite3.Connection, suffix: str = "") -> None:
             session_type TEXT NOT NULL,
             prompt TEXT NOT NULL DEFAULT '',
             codex_session_id TEXT,
-            status TEXT NOT NULL DEFAULT 'idle',
+            status TEXT NOT NULL DEFAULT 'finished',
             last_error TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -254,6 +270,12 @@ def migrate_targets(
                 "note": str(row.get("note") or ""),
                 "workspace_path": str(workspace),
                 "color_index": parse_int(row.get("color_index")) or 0,
+                "auto_mining_state": normalize_auto_mining_state(row.get("auto_mining_state")),
+                "consecutive_nonzero_exit_count": max(parse_int(row.get("consecutive_nonzero_exit_count")) or 0, 0),
+                "last_nonzero_exit_reason": str(row.get("last_nonzero_exit_reason") or ""),
+                "intervention_required": 1 if truthy(row.get("intervention_required")) else 0,
+                "intervention_reason": str(row.get("intervention_reason") or ""),
+                "intervention_notice_read": 0 if row.get("intervention_notice_read") in {0, "0", False} else 1,
                 "created_at": str(row.get("created_at") or timestamp),
                 "updated_at": str(row.get("updated_at") or timestamp),
             },
@@ -299,6 +321,12 @@ def migrate_sessions(
                         "note": "",
                         "workspace_path": str(target_workspace(legacy_name)),
                         "color_index": (target_id - 1) % len(TARGET_COLORS),
+                        "auto_mining_state": "running",
+                        "consecutive_nonzero_exit_count": 0,
+                        "last_nonzero_exit_reason": "",
+                        "intervention_required": 0,
+                        "intervention_reason": "",
+                        "intervention_notice_read": 1,
                         "created_at": str(row.get("created_at") or timestamp),
                         "updated_at": str(row.get("updated_at") or timestamp),
                     },
@@ -306,9 +334,7 @@ def migrate_sessions(
         session_type = str(row.get("session_type") or "debug")
         if session_type not in SESSION_TYPES:
             session_type = "debug"
-        status = str(row.get("status") or "idle")
-        if status in {"running", "judging"}:
-            status = "idle"
+        status = normalize_session_status(row.get("status"))
         session_id_map[old_session_id] = old_session_id
         migrated.append(
             {
@@ -338,8 +364,16 @@ def insert_migrated_rows(
     for row in targets:
         conn.execute(
             """
-            INSERT INTO targets_new(id, name, note, workspace_path, color_index, created_at, updated_at)
-            VALUES (:id, :name, :note, :workspace_path, :color_index, :created_at, :updated_at)
+            INSERT INTO targets_new(
+                id, name, note, workspace_path, color_index, auto_mining_state,
+                consecutive_nonzero_exit_count, last_nonzero_exit_reason, intervention_required,
+                intervention_reason, intervention_notice_read, created_at, updated_at
+            )
+            VALUES (
+                :id, :name, :note, :workspace_path, :color_index, :auto_mining_state,
+                :consecutive_nonzero_exit_count, :last_nonzero_exit_reason, :intervention_required,
+                :intervention_reason, :intervention_notice_read, :created_at, :updated_at
+            )
             """,
             row,
         )
@@ -378,7 +412,7 @@ def insert_migrated_rows(
         session_id = parse_int(row.get("session_id"))
         if session_id not in session_id_map:
             continue
-        status = str(row.get("status") or "failed")
+        status = normalize_run_status(row.get("status"))
         ended_at = optional_text(row.get("ended_at"))
         if status == "running":
             status = "interrupted"
@@ -417,8 +451,57 @@ def parse_int(value: object) -> int | None:
         return None
 
 
+def truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def normalize_auto_mining_state(value: object) -> str:
+    return "frozen" if str(value or "").strip().lower() == "frozen" else "running"
+
+
+def normalize_session_status(value: object) -> str:
+    status = str(value or "").strip().lower()
+    if status in {"running", "pause", "interrupted", "error", "finished"}:
+        return status
+    if status in {"failed"}:
+        return "error"
+    if status in {"running"}:
+        return "running"
+    return "finished"
+
+
+def normalize_run_status(value: object) -> str:
+    status = str(value or "").strip().lower()
+    if status in {"running", "pause", "interrupted", "error", "finished"}:
+        return status
+    if status == "completed":
+        return "finished"
+    if status == "failed":
+        return "error"
+    return "error"
+
+
 def optional_text(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
+
+
+def nonzero_exit_reason(returncode: int, error: str | None, last_error: str | None, last_message: str) -> str:
+    fragments = [item.strip() for item in (error, last_error, last_message) if item and item.strip()]
+    if not fragments:
+        return f"Codex 返回非零状态 {returncode}"
+    return f"Codex 返回非零状态 {returncode}: {truncate_text(fragments[0], 1000)}"
 
 
 def set_default_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
@@ -498,7 +581,9 @@ def list_state_tree() -> list[RowDict]:
             row_to_dict(row)
             for row in conn.execute(
                 """
-                SELECT id, name, note, workspace_path, color_index, created_at, updated_at
+                SELECT id, name, note, workspace_path, color_index, auto_mining_state,
+                       consecutive_nonzero_exit_count, last_nonzero_exit_reason, intervention_required,
+                       intervention_reason, intervention_notice_read, created_at, updated_at
                 FROM targets
                 ORDER BY datetime(updated_at) DESC, id DESC
                 """,
@@ -543,7 +628,7 @@ def create_target_with_default_session(name: str, note: str, workspace_path: Pat
         target_id = int(cur.lastrowid or 0)
         if not target_id:
             raise RuntimeError("目标创建后没有返回 id")
-        prompt = "请阅读 init.md，完成目标初始化并开始挖掘漏洞。"
+        prompt = "开始自动漏洞挖掘任务"
         session_cur = conn.execute(
             """
             INSERT INTO sessions(target_id, name, session_type, prompt, created_at, updated_at)
@@ -556,6 +641,24 @@ def create_target_with_default_session(name: str, note: str, workspace_path: Pat
             raise RuntimeError("默认 mining session 创建后没有返回 id")
         set_selected(conn, target_id, session_id, created_at)
     return get_existing_target(target_id), get_existing_session(session_id)
+
+
+def create_mining_session(target_id: int, prompt: str, *, name: str | None = None) -> RowDict:
+    target = get_existing_target(target_id)
+    created_at = now_iso()
+    session_name = name or f"{row_str(target, 'name')} mining"
+    with connect_db() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO sessions(target_id, name, session_type, prompt, created_at, updated_at)
+            VALUES (?, ?, 'mining', ?, ?, ?)
+            """,
+            (target_id, session_name, prompt, created_at, created_at),
+        )
+        session_id = int(cur.lastrowid or 0)
+        if not session_id:
+            raise RuntimeError("mining session 创建后没有返回 id")
+    return get_existing_session(session_id)
 
 
 def create_debug_session(target_id: int, payload: JsonObject) -> RowDict:
@@ -600,6 +703,73 @@ def update_target_note(target_id: int, note: str) -> RowDict:
     return get_existing_target(target_id)
 
 
+def update_target_auto_mining_state(target_id: int, state: str) -> RowDict:
+    target = get_existing_target(target_id)
+    normalized = normalize_auto_mining_state(state)
+    with connect_db() as conn:
+        timestamp = now_iso()
+        if normalized == "running" and row_str(target, "auto_mining_state") == "frozen":
+            conn.execute(
+                """
+                UPDATE targets
+                SET auto_mining_state = ?, consecutive_nonzero_exit_count = 0,
+                    last_nonzero_exit_reason = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (normalized, timestamp, target_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE targets SET auto_mining_state = ?, updated_at = ? WHERE id = ?",
+                (normalized, timestamp, target_id),
+            )
+    return get_existing_target(target_id)
+
+
+def mark_intervention_detected(target_id: int, reason: str) -> RowDict:
+    target = get_existing_target(target_id)
+    previous_required = row_int(target, "intervention_required")
+    previous_reason = row_str(target, "intervention_reason")
+    notice_read = row_int(target, "intervention_notice_read", 1)
+    if not previous_required or reason != previous_reason:
+        notice_read = 0
+    timestamp = now_iso()
+    with connect_db() as conn:
+        conn.execute(
+            """
+            UPDATE targets
+            SET auto_mining_state = 'frozen', intervention_required = 1, intervention_reason = ?,
+                intervention_notice_read = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (reason, notice_read, timestamp, target_id),
+        )
+    return get_existing_target(target_id)
+
+
+def mark_intervention_notice_read(target_id: int) -> RowDict:
+    get_existing_target(target_id)
+    with connect_db() as conn:
+        conn.execute(
+            "UPDATE targets SET intervention_notice_read = 1, updated_at = ? WHERE id = ?",
+            (now_iso(), target_id),
+        )
+    return get_existing_target(target_id)
+
+
+def mark_target_mining_sessions_error(target_id: int, reason: str) -> None:
+    get_existing_target(target_id)
+    with connect_db() as conn:
+        conn.execute(
+            """
+            UPDATE sessions
+            SET status = 'error', last_error = ?, updated_at = ?
+            WHERE target_id = ? AND session_type = 'mining'
+            """,
+            (reason, now_iso(), target_id),
+        )
+
+
 def delete_target(target_id: int) -> None:
     target = get_existing_target(target_id)
     workspace = Path(row_str(target, "workspace_path"))
@@ -621,6 +791,17 @@ def delete_target(target_id: int) -> None:
             set_setting_on_connection(conn, "selected_target_id", "", timestamp)
         if settings.get("selected_session_id") in selected_session_ids:
             set_setting_on_connection(conn, "selected_session_id", "", timestamp)
+
+
+def delete_session(session_id: int) -> None:
+    session = get_existing_session(session_id)
+    if row_str(session, "status") in BUSY_STATUSES:
+        raise ValueError("running session 不能删除，请先停止")
+    with connect_db() as conn:
+        settings = get_settings(conn)
+        conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        if settings.get("selected_session_id") == str(session_id):
+            set_setting_on_connection(conn, "selected_session_id", "", now_iso())
 
 
 def set_setting_on_connection(conn: sqlite3.Connection, key: str, value: str, timestamp: str) -> None:
@@ -647,7 +828,13 @@ def add_message(session_id: int, role: str, content: str, kind: str = "message")
         conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (timestamp, session_id))
 
 
-def upsert_assistant_message(session_id: int, message_id: int | None, content: str) -> int | None:
+def upsert_assistant_message(
+    session_id: int,
+    message_id: int | None,
+    content: str,
+    *,
+    touch_created_at: bool = False,
+) -> int | None:
     content = content.strip()
     if not content:
         return message_id
@@ -659,10 +846,16 @@ def upsert_assistant_message(session_id: int, message_id: int | None, content: s
                 (message_id, session_id),
             ).fetchone()
             if row:
-                conn.execute(
-                    "UPDATE messages SET content = ? WHERE id = ?",
-                    (content, message_id),
-                )
+                if touch_created_at:
+                    conn.execute(
+                        "UPDATE messages SET content = ?, created_at = ? WHERE id = ?",
+                        (content, timestamp, message_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE messages SET content = ? WHERE id = ?",
+                        (content, message_id),
+                    )
                 conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (timestamp, session_id))
                 return message_id
         cur = conn.execute(
@@ -687,6 +880,96 @@ def list_messages(session_id: int, after_id: int = 0, limit: int = 300) -> list[
             (session_id, after_id, limit),
         ).fetchall()
     return [row_to_dict(row) for row in rows]
+
+
+def target_has_occupied_mining_session(target_id: int) -> bool:
+    with connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sessions
+            WHERE target_id = ? AND session_type = 'mining' AND status IN ('running', 'pause')
+            LIMIT 1
+            """,
+            (target_id,),
+        ).fetchone()
+    return row is not None
+
+
+def target_has_running_mining_session(target_id: int) -> bool:
+    return target_has_occupied_mining_session(target_id)
+
+
+def find_recoverable_mining_session(target_id: int) -> RowDict | None:
+    with connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT s.*
+            FROM sessions s
+            WHERE s.target_id = ?
+              AND s.session_type = 'mining'
+              AND s.status = 'interrupted'
+              AND s.codex_session_id IS NOT NULL
+            ORDER BY datetime(s.updated_at) ASC, s.id ASC
+            LIMIT 1
+            """,
+            (target_id,),
+        ).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def find_pending_mining_session(target_id: int) -> RowDict | None:
+    with connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT s.*
+            FROM sessions s
+            WHERE s.target_id = ?
+              AND s.session_type = 'mining'
+              AND s.status = 'finished'
+              AND s.codex_session_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id = s.id)
+            ORDER BY s.id ASC
+            LIMIT 1
+            """,
+            (target_id,),
+        ).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def running_auto_mining_session_ids(target_id: int) -> list[int]:
+    with connect_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT s.id
+            FROM sessions s
+            JOIN runs r ON r.session_id = s.id AND r.status = 'running'
+            WHERE s.target_id = ?
+              AND s.session_type = 'mining'
+              AND s.status = 'running'
+              AND r.source IN ('scheduler', 'system')
+            ORDER BY s.id ASC
+            """,
+            (target_id,),
+        ).fetchall()
+    return [int(row["id"]) for row in rows]
+
+
+def target_has_auto_mining_run(target_id: int) -> bool:
+    with connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM runs r
+            JOIN sessions s ON s.id = r.session_id
+            WHERE s.target_id = ?
+              AND s.session_type = 'mining'
+              AND r.source IN ('scheduler', 'system')
+            LIMIT 1
+            """,
+            (target_id,),
+        ).fetchone()
+    return row is not None
 
 
 def create_run(
@@ -732,8 +1015,13 @@ def update_run_result(
     last_message: str,
     error: str | None,
     last_error: str | None,
+    session_status: str | None = None,
 ) -> None:
     with connect_db() as conn:
+        target_row = conn.execute("SELECT target_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        target_id = int(target_row["target_id"]) if target_row else None
+        normalized_status = normalize_run_status(status)
+        next_session_status = session_status or normalized_status
         if codex_session_id_after:
             conn.execute(
                 "UPDATE sessions SET codex_session_id = ? WHERE id = ?",
@@ -746,9 +1034,63 @@ def update_run_result(
                 last_message = ?, error = ?
             WHERE id = ?
             """,
-            (status, returncode, ended_at, codex_session_id_after, last_message, error, run_id),
+            (normalized_status, returncode, ended_at, codex_session_id_after, last_message, error, run_id),
         )
         conn.execute(
-            "UPDATE sessions SET status = 'idle', last_error = ?, updated_at = ? WHERE id = ?",
-            (last_error, ended_at, session_id),
+            "UPDATE sessions SET status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+            (next_session_status, last_error, ended_at, session_id),
+        )
+        if target_id is not None:
+            update_target_exit_streak(
+                conn,
+                target_id=target_id,
+                status=normalized_status,
+                returncode=returncode,
+                ended_at=ended_at,
+                reason=nonzero_exit_reason(returncode, error, last_error, last_message),
+            )
+
+
+def update_target_exit_streak(
+    conn: sqlite3.Connection,
+    *,
+    target_id: int,
+    status: str,
+    returncode: int,
+    ended_at: str,
+    reason: str,
+) -> None:
+    if status == "error" and returncode > 0:
+        row = conn.execute(
+            "SELECT consecutive_nonzero_exit_count FROM targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        next_count = (int(row["consecutive_nonzero_exit_count"]) if row else 0) + 1
+        if next_count >= 3:
+            conn.execute(
+                """
+                UPDATE targets
+                SET consecutive_nonzero_exit_count = ?, last_nonzero_exit_reason = ?,
+                    auto_mining_state = 'frozen', updated_at = ?
+                WHERE id = ?
+                """,
+                (next_count, reason, ended_at, target_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE targets
+                SET consecutive_nonzero_exit_count = ?, last_nonzero_exit_reason = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_count, reason, ended_at, target_id),
+            )
+    elif status == "finished" and returncode == 0:
+        conn.execute(
+            """
+            UPDATE targets
+            SET consecutive_nonzero_exit_count = 0, last_nonzero_exit_reason = '', updated_at = ?
+            WHERE id = ?
+            """,
+            (ended_at, target_id),
         )

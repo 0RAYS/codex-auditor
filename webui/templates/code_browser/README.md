@@ -17,10 +17,10 @@ cmake -S /目标/路径 -B /目标/路径/build -DCMAKE_EXPORT_COMPILE_COMMANDS=
 bear -- make
 ```
 
-`build_index.py` 默认会在 workspace、`build/`、`out/` 等常见位置查找 `compile_commands.json`，也可以显式指定：
+`build_index` 默认会在 workspace、`build/`、`out/` 等常见位置查找 `compile_commands.json`，也可以显式指定：
 
 ```sh
-python3 code_browser/build_index.py \
+cargo run --release --manifest-path code_browser/Cargo.toml --bin build_index -- \
   --workspace /目标/路径 \
   --compile-commands /目标/路径/build/compile_commands.json \
   --db /目标/路径/code_browser/code_browser.sqlite
@@ -29,7 +29,7 @@ python3 code_browser/build_index.py \
 ## 构建索引
 
 ```sh
-python3 code_browser/build_index.py \
+cargo run --release --manifest-path code_browser/Cargo.toml --bin build_index -- \
   --workspace /目标/路径 \
   --db /目标/路径/code_browser/code_browser.sqlite \
   --route-file /目标/路径/code_browser/routes.json \
@@ -37,6 +37,8 @@ python3 code_browser/build_index.py \
 ```
 
 `--path` 只限制文件辅助信息的收集范围；C/C++ 语义索引由 compile database 中的翻译单元决定。
+默认只收集 C/C++ 相关后缀：`.c/.cc/.cpp/.cxx/.h/.hh/.hpp/.hxx`；test/fuzz 目录不会被特殊过滤。
+`PARSE_DETAILED_PROCESSING_RECORD` 默认关闭，需要时可加 `--detailed-processing-record`。
 
 `routes.json` 是可选路由文件：
 

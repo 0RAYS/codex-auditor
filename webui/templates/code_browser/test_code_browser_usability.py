@@ -8,7 +8,7 @@ import pytest
 
 
 CODE_BROWSER_DIR = Path(__file__).resolve().parent
-BUILD_INDEX = CODE_BROWSER_DIR / "build_index.py"
+CARGO_MANIFEST = CODE_BROWSER_DIR / "Cargo.toml"
 QUERY = CODE_BROWSER_DIR / "query.py"
 
 
@@ -37,16 +37,24 @@ def find_compile_commands(root: Path) -> Path | None:
     return None
 
 
+def build_index_cmd(*args: str) -> list[str]:
+    return ["cargo", "run", "--release", "--manifest-path", str(CARGO_MANIFEST), "--bin", "build_index", "--", *args]
+
+
+def build_timeout() -> int:
+    return int(os.environ.get("CODE_BROWSER_BUILD_TIMEOUT", "240"))
+
+
 @pytest.fixture(scope="session")
 def indexed_db(tmp_path_factory):
     root = project_root()
     db = tmp_path_factory.mktemp("code_browser") / "code_browser.sqlite"
     proc = subprocess.run(
-        ["python3", str(BUILD_INDEX), "--workspace", str(root), "--db", str(db)],
+        build_index_cmd("--workspace", str(root), "--db", str(db)),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=int(os.environ.get("CODE_BROWSER_BUILD_TIMEOUT", "240")),
+        timeout=build_timeout(),
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return root, db
@@ -89,7 +97,7 @@ def write_two_source_project(root: Path):
     (root / "compile_commands.json").write_text(json.dumps(commands), encoding="utf-8")
 
 
-def test_target_test_files_are_skipped(tmp_path):
+def test_c_family_test_and_fuzz_files_are_indexed(tmp_path):
     root = tmp_path / "project"
     src = root / "src"
     tests = root / "tests"
@@ -110,11 +118,11 @@ def test_target_test_files_are_skipped(tmp_path):
     db = tmp_path / "code_browser.sqlite"
 
     proc = subprocess.run(
-        ["python3", str(BUILD_INDEX), "--workspace", str(root), "--db", str(db)],
+        build_index_cmd("--workspace", str(root), "--db", str(db)),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=60,
+        timeout=build_timeout(),
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
@@ -123,38 +131,30 @@ def test_target_test_files_are_skipped(tmp_path):
         tables = {row[0] for row in handle.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert "tests" not in tables
         meta = {row[0]: row[1] for row in handle.execute("SELECT key, value FROM meta")}
-        assert meta["compile_command_count"] == "1"
+        assert meta["compile_command_count"] == "3"
+        assert meta["detailed_processing_record"] == "no"
         files = {row[0] for row in handle.execute("SELECT path FROM files")}
         assert "src/main.c" in files
-        assert "src/helper_test.c" not in files
-        assert "tests/test_main.c" not in files
-        assert "fuzz/fuzz_main.c" not in files
+        assert "src/helper_test.c" in files
+        assert "tests/test_main.c" in files
+        assert "fuzz/fuzz_main.c" in files
+        names = {row[0] for row in handle.execute("SELECT name FROM symbols")}
+        assert {"helper", "test_main", "fuzz_main"} <= names
     finally:
         handle.close()
 
-    proc = subprocess.run(
-        ["python3", str(QUERY), "--workspace", str(root), "--db", str(db), "tests"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=60,
-    )
-    assert proc.returncode != 0
-    assert "invalid choice" in proc.stderr
-
 
 def test_tu_limit_restricts_semantic_indexing(tmp_path):
-    pytest.importorskip("clang.cindex")
     root = tmp_path / "project"
     write_two_source_project(root)
     db = tmp_path / "code_browser.sqlite"
 
     proc = subprocess.run(
-        ["python3", str(BUILD_INDEX), "--workspace", str(root), "--db", str(db), "--jobs", "1", "--tu-limit", "1"],
+        build_index_cmd("--workspace", str(root), "--db", str(db), "--jobs", "1", "--tu-limit", "1"),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=60,
+        timeout=build_timeout(),
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
@@ -173,7 +173,6 @@ def test_tu_limit_restricts_semantic_indexing(tmp_path):
 
 
 def test_parallel_and_serial_index_same_rows(tmp_path):
-    pytest.importorskip("clang.cindex")
     root = tmp_path / "project"
     write_two_source_project(root)
     serial_db = tmp_path / "serial.sqlite"
@@ -181,11 +180,11 @@ def test_parallel_and_serial_index_same_rows(tmp_path):
 
     for db, jobs in ((serial_db, "1"), (parallel_db, "2")):
         proc = subprocess.run(
-            ["python3", str(BUILD_INDEX), "--workspace", str(root), "--db", str(db), "--jobs", jobs],
+            build_index_cmd("--workspace", str(root), "--db", str(db), "--jobs", jobs),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=60,
+            timeout=build_timeout(),
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
 

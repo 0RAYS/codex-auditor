@@ -21,7 +21,10 @@ def resolve_db(workspace: Path, db: Path) -> Path:
 
 def connect(db: Path):
     if not db.exists():
-        raise SystemExit(f"找不到索引: {db}\n请先运行 code_browser/build_index.py")
+        raise SystemExit(
+            f"找不到索引: {db}\n"
+            "请先运行 cargo run --release --manifest-path code_browser/Cargo.toml --bin build_index --"
+        )
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     return conn

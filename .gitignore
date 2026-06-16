@@ -2,4 +2,4 @@
 __pycache__
 queue.sqlite
 .TASK.md
-webui/templates/code_browser/target/
+xref/target/

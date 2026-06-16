@@ -43,6 +43,7 @@ def base_prompt(
 
         1. 拉取目标程序完整源码并编译，要求 asan、release 和 debug 三个版本，配置好尽可能可用的调试环境。
         2. 配置好 code_browser 和 verify，确保 pytest 通过且工具可用。
+        3. 运行长任务时, 使用 thread automation, 运行结束后读取最后一段输出来判断是否成功。
         """,
     ).strip()
 

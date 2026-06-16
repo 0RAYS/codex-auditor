@@ -549,24 +549,19 @@ def test_prompt_rendering_rules(app_modules):
     prompts = importlib.import_module("auditor_webui.prompts")
     session_row = db.get_existing_session(int(session["id"]))
 
-    first = prompts.base_prompt(session_row, "开始自动漏洞挖掘任务", source="scheduler", first_auto_mining=True)
-    assert f"目标 ID: {target['id']}" in first
-    assert "目标补充说明:" in first
-    assert "重点关注 parser 边界" in first
-    assert "## 首轮初始化检查" in first
-    assert "## 目录结构与协议" in first
-    assert "$AUDITOR_TARGET_ID/intervention" in first
+    scheduler_prompt = prompts.base_prompt(session_row, "开始自动漏洞挖掘任务", source="scheduler")
+    assert f"目标 ID: {target['id']}" in scheduler_prompt
+    assert "目标补充说明:" in scheduler_prompt
+    assert "重点关注 parser 边界" in scheduler_prompt
+    assert "如果以下任务未完成" in scheduler_prompt
+    assert "## 目录结构与协议" in scheduler_prompt
+    assert "$AUDITOR_TARGET_ID/intervention" in scheduler_prompt
 
-    later = prompts.base_prompt(session_row, "继续自动漏洞挖掘任务", source="scheduler", first_auto_mining=False)
-    assert "重点关注 parser 边界" in later
-    assert "## 目录结构与协议" in later
-    assert "## 首轮初始化检查" not in later
-
-    user = prompts.base_prompt(session_row, "用户原文", source="user", first_auto_mining=True)
+    user = prompts.base_prompt(session_row, "用户原文", source="user")
     assert user == "用户原文"
     assert "重点关注 parser 边界" not in user
 
-    for rendered in (first, later, user):
+    for rendered in (scheduler_prompt, user):
         assert "Session 类型" not in rendered
         assert "init.md" not in rendered
         assert "127.0.0.1" not in rendered
@@ -594,7 +589,7 @@ def test_start_agent_run_stores_rendered_scheduler_prompt(app_modules, monkeypat
     stored_prompt = messages[0]["content"]
     assert stored_prompt != scheduler.NEW_MINING_PROMPT
     assert "你正在执行 codex-auditor 自动化二进制安全审计会话" in stored_prompt
-    assert "## 首轮初始化检查" in stored_prompt
+    assert "如果以下任务未完成" in stored_prompt
     assert "补充说明来自 DB" in stored_prompt
 
     with db.connect_db() as conn:
@@ -627,7 +622,7 @@ def test_start_agent_run_stores_manual_user_prompt_only(app_modules, monkeypatch
     assert "目标补充说明" not in run_prompt
 
 
-def test_subsequent_scheduler_prompt_omits_first_run_checklist(app_modules, monkeypatch: pytest.MonkeyPatch):
+def test_subsequent_scheduler_prompt_keeps_checklist(app_modules, monkeypatch: pytest.MonkeyPatch):
     db = app_modules["db"]
     runner = app_modules["runner"]
     scheduler = app_modules["scheduler"]
@@ -639,7 +634,7 @@ def test_subsequent_scheduler_prompt_omits_first_run_checklist(app_modules, monk
     messages = db.list_messages(int(session["id"]))
     assert len(messages) == 1
     assert "## 目录结构与协议" in messages[0]["content"]
-    assert "## 首轮初始化检查" not in messages[0]["content"]
+    assert "如果以下任务未完成" in messages[0]["content"]
 
 
 def test_workspace_no_longer_creates_or_updates_init_md(app_modules):

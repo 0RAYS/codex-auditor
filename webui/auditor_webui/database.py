@@ -955,23 +955,6 @@ def running_auto_mining_session_ids(target_id: int) -> list[int]:
     return [int(row["id"]) for row in rows]
 
 
-def target_has_auto_mining_run(target_id: int) -> bool:
-    with connect_db() as conn:
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM runs r
-            JOIN sessions s ON s.id = r.session_id
-            WHERE s.target_id = ?
-              AND s.session_type = 'mining'
-              AND r.source IN ('scheduler', 'system')
-            LIMIT 1
-            """,
-            (target_id,),
-        ).fetchone()
-    return row is not None
-
-
 def create_run(
     *,
     session_id: int,

@@ -12,7 +12,6 @@ def base_prompt(
     user_prompt: str,
     *,
     source: str = "user",
-    first_auto_mining: bool = False,
 ) -> str:
     if source == "user":
         return user_prompt
@@ -30,7 +29,6 @@ def base_prompt(
         目标 ID: {target_id}
         目标工作区: {workspace_path}
 
-        - 使用 $bug-hunting 指导漏洞挖掘，候选漏洞落地时使用 $bug-confirming。
         - 需要人工介入时，先写 ./human_intervention.json 说明 reason，再调用 WebUI PATCH API: PATCH /api/targets/$AUDITOR_TARGET_ID/intervention。
         - 如果任务没有完成，不要只做泛泛总结；继续推进最有价值的审计路径。
 
@@ -41,7 +39,7 @@ def base_prompt(
 
     checklist = dedent(
         """
-        ## 首轮初始化检查
+        如果以下任务未完成, 则你是项目初始化负责人, 以下是你的checklist。
 
         1. 拉取目标程序完整源码并编译，要求 asan、release 和 debug 三个版本，配置好尽可能可用的调试环境。
         2. 配置好 code_browser 和 verify，确保 pytest 通过且工具可用。
@@ -61,19 +59,11 @@ def base_prompt(
         - `vuln.md`：记录攻击面和后续审计结果。
         - `$bug-confirming`：候选漏洞落地指南。
         - `$bug-hunting`：漏洞挖掘指导。
-        """,
-    ).strip()
-
-    skill = dedent(
-        """
         - 使用 $bug-hunting 指导漏洞挖掘，候选漏洞落地时使用 $bug-confirming。
         """,
     ).strip()
 
     blocks = [general]
-    if first_auto_mining:
-        blocks.append(checklist)
-    else:
-        blocks.append(skill)
+    blocks.append(checklist)
     blocks.append(structure)
     return "\n\n".join(blocks)

@@ -20,7 +20,6 @@ from .database import (
     get_session,
     now_iso,
     set_run_event_log_path,
-    target_has_auto_mining_run,
     update_run_result,
     upsert_assistant_message,
 )
@@ -272,12 +271,10 @@ def start_agent_run(session_id: int, prompt: str, *, source: str) -> bool:
     if source == "scheduler" and row_str(session, "status") == "pause":
         return False
 
-    automatic_mining = source in {"scheduler", "system"} and row_str(session, "session_type") == "mining"
     rendered_prompt = base_prompt(
         session,
         prompt,
         source=source,
-        first_auto_mining=automatic_mining and not target_has_auto_mining_run(row_int(session, "target_id")),
     ).strip()
     if not rendered_prompt:
         raise ValueError("prompt 不能为空")

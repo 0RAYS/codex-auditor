@@ -97,7 +97,7 @@ def write_two_source_project(root: Path):
     (root / "compile_commands.json").write_text(json.dumps(commands), encoding="utf-8")
 
 
-def test_c_family_test_and_fuzz_files_are_indexed(tmp_path):
+def test_c_family_test_and_fuzz_translation_units_are_indexed(tmp_path):
     root = tmp_path / "project"
     src = root / "src"
     tests = root / "tests"
@@ -133,13 +133,9 @@ def test_c_family_test_and_fuzz_files_are_indexed(tmp_path):
         meta = {row[0]: row[1] for row in handle.execute("SELECT key, value FROM meta")}
         assert meta["compile_command_count"] == "3"
         assert meta["detailed_processing_record"] == "no"
-        files = {row[0] for row in handle.execute("SELECT path FROM files")}
-        assert "src/main.c" in files
-        assert "src/helper_test.c" in files
-        assert "tests/test_main.c" in files
-        assert "fuzz/fuzz_main.c" in files
         names = {row[0] for row in handle.execute("SELECT name FROM symbols")}
         assert {"helper", "test_main", "fuzz_main"} <= names
+        assert "helper_test" not in names
     finally:
         handle.close()
 
@@ -163,8 +159,6 @@ def test_tu_limit_restricts_semantic_indexing(tmp_path):
         meta = {row[0]: row[1] for row in handle.execute("SELECT key, value FROM meta")}
         assert meta["compile_command_count"] == "1"
         assert meta["tu_limit"] == "1"
-        compile_db_files = {row[0] for row in handle.execute("SELECT path FROM files WHERE in_compile_db = 1")}
-        assert compile_db_files == {"src/first.c", "src/second.c"}
         names = {row[0] for row in handle.execute("SELECT name FROM symbols")}
         assert "alpha_helper" in names
         assert "beta_helper" not in names
@@ -195,11 +189,11 @@ def test_parallel_and_serial_index_same_rows(tmp_path):
         finally:
             handle.close()
 
-    assert indexed_rows(serial_db, "symbols", "usr, name, kind, path, line, column, is_definition") == indexed_rows(
-        parallel_db, "symbols", "usr, name, kind, path, line, column, is_definition"
+    assert indexed_rows(serial_db, "symbols", "usr, name, kind, path, line, is_definition") == indexed_rows(
+        parallel_db, "symbols", "usr, name, kind, path, line, is_definition"
     )
-    assert indexed_rows(serial_db, "refs", "referenced_usr, name, kind, path, line, column, context") == indexed_rows(
-        parallel_db, "refs", "referenced_usr, name, kind, path, line, column, context"
+    assert indexed_rows(serial_db, "refs", "referenced_usr, name, kind, path, line, context") == indexed_rows(
+        parallel_db, "refs", "referenced_usr, name, kind, path, line, context"
     )
 
 
@@ -234,15 +228,27 @@ def sample_definitions(conn, limit: int = 12):
 
 def test_build_index_smoke(conn):
     meta = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM meta")}
-    assert int(meta.get("file_count", "0")) > 0
     assert int(meta.get("symbol_count", "0")) > 0
     assert int(meta.get("ref_count", "0")) > 0
 
 
-def test_diagnostics_threshold(conn):
-    max_fatal = int(os.environ.get("CODE_BROWSER_MAX_FATAL_DIAGS", "0"))
-    count = conn.execute("SELECT COUNT(*) FROM diagnostics WHERE severity >= 3").fetchone()[0]
-    assert count <= max_fatal
+def test_simplified_schema(conn):
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"meta", "symbols", "refs", "commits"} <= tables
+    assert {"files", "diagnostics", "routes"}.isdisjoint(tables)
+
+    symbol_columns = {row[1] for row in conn.execute("PRAGMA table_info(symbols)")}
+    assert {"column", "extent_start_line", "extent_start_column", "extent_end_line", "extent_end_column", "backend"}.isdisjoint(
+        symbol_columns
+    )
+    assert {"usr", "name", "kind", "path", "line", "is_definition", "type", "signature"} <= symbol_columns
+
+    ref_columns = {row[1] for row in conn.execute("PRAGMA table_info(refs)")}
+    assert "column" not in ref_columns
+    assert {"referenced_usr", "name", "kind", "path", "line", "context"} <= ref_columns
+
+    meta = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM meta")}
+    assert {"file_count", "diagnostic_count", "indexed_paths", "route_file", "file_elapsed_seconds"}.isdisjoint(meta)
 
 
 def test_symbol_queries_from_index(indexed_db, conn):

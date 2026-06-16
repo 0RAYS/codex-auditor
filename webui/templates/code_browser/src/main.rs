@@ -1,6 +1,5 @@
 mod compile_db;
 mod db;
-mod files;
 mod git_index;
 mod path_util;
 mod semantic;
@@ -8,17 +7,14 @@ mod semantic;
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
 use rusqlite::{Connection, params};
-use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Instant;
 
 use compile_db::{find_compile_commands, load_compile_commands};
-use db::{count_table, insert_routes, reset_db};
-use files::index_files;
-use git_index::{git_metadata, index_commits, json_paths};
-use path_util::{DEFAULT_EXCLUDE_PARTS, absolutize_path, rel};
+use db::reset_db;
+use git_index::{git_metadata, index_commits};
 use semantic::index_translation_units;
 
 const DEFAULT_DB: &str = "code_browser/code_browser.sqlite";
@@ -32,16 +28,8 @@ struct Args {
     db: PathBuf,
     #[arg(long)]
     compile_commands: Option<PathBuf>,
-    #[arg(long = "path", action = ArgAction::Append)]
-    paths: Vec<PathBuf>,
-    #[arg(long = "exclude-part", action = ArgAction::Append)]
-    exclude_parts: Vec<String>,
-    #[arg(long)]
-    route_file: Option<PathBuf>,
     #[arg(long, default_value_t = 500)]
     max_commits: i32,
-    #[arg(long)]
-    limit: Option<usize>,
     #[arg(long, value_parser = positive_usize)]
     tu_limit: Option<usize>,
     #[arg(long, default_value_t = default_jobs(), value_parser = positive_usize)]
@@ -50,6 +38,8 @@ struct Args {
     batch_size: usize,
     #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
     detailed_processing_record: bool,
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+    libclang_warnings: bool,
 }
 
 fn default_jobs() -> usize {
@@ -70,6 +60,7 @@ fn positive_usize(value: &str) -> std::result::Result<usize, String> {
 }
 
 fn main() -> Result<()> {
+    let total_started = Instant::now();
     let args = Args::parse();
     let workspace = fs::canonicalize(&args.workspace)
         .with_context(|| format!("无法解析 workspace: {}", args.workspace.display()))?;
@@ -83,33 +74,12 @@ fn main() -> Result<()> {
             .with_context(|| format!("无法创建数据库目录: {}", parent.display()))?;
     }
 
-    let mut paths = if args.paths.is_empty() {
-        vec![workspace.clone()]
-    } else {
-        args.paths
-            .iter()
-            .map(|p| absolutize_path(&workspace, p))
-            .collect::<Vec<_>>()
-    };
-    for path in &mut paths {
-        if let Ok(canon) = fs::canonicalize(&path) {
-            *path = canon;
-        }
-    }
-
-    let mut exclude_parts = DEFAULT_EXCLUDE_PARTS
-        .iter()
-        .map(|value| (*value).to_owned())
-        .collect::<HashSet<_>>();
-    exclude_parts.extend(args.exclude_parts.iter().cloned());
-
     let compile_commands_path = find_compile_commands(&workspace, args.compile_commands.as_deref());
-    let (mut compile_commands, compile_commands_meta) =
-        load_compile_commands(compile_commands_path.as_deref(), &workspace)?;
-    let compile_db_sources = compile_commands
-        .iter()
-        .filter_map(|command| rel(&workspace, &command.source).ok())
-        .collect::<HashSet<_>>();
+    let (mut compile_commands, compile_commands_meta) = load_compile_commands(
+        compile_commands_path.as_deref(),
+        &workspace,
+        !args.libclang_warnings,
+    )?;
     if let Some(limit) = args.tu_limit {
         compile_commands.truncate(limit);
     }
@@ -117,20 +87,9 @@ fn main() -> Result<()> {
     let mut conn =
         Connection::open(&db).with_context(|| format!("无法打开数据库: {}", db.display()))?;
     reset_db(&mut conn)?;
-    insert_routes(&conn, args.route_file.as_deref())?;
-    index_files(
-        &conn,
-        &workspace,
-        &paths,
-        &exclude_parts,
-        args.limit,
-        &compile_db_sources,
-        args.batch_size,
-    )?;
-    let file_count = count_table(&conn, "files")?;
 
-    let started = Instant::now();
-    let (symbol_count, ref_count, diagnostic_count) = index_translation_units(
+    let semantic_started = Instant::now();
+    let (symbol_count, ref_count) = index_translation_units(
         &conn,
         &workspace,
         &compile_commands,
@@ -138,8 +97,11 @@ fn main() -> Result<()> {
         args.batch_size,
         args.detailed_processing_record,
     )?;
-    let semantic_elapsed = started.elapsed().as_secs_f64();
+    let semantic_elapsed = semantic_started.elapsed().as_secs_f64();
+    let commit_started = Instant::now();
     index_commits(&conn, &workspace, args.max_commits)?;
+    let commit_elapsed = commit_started.elapsed().as_secs_f64();
+    let total_elapsed = total_started.elapsed().as_secs_f64();
 
     let mut meta = git_metadata(&workspace);
     meta.insert("backend".to_owned(), "libclang".to_owned());
@@ -148,17 +110,8 @@ fn main() -> Result<()> {
         "compile_command_count".to_owned(),
         compile_commands.len().to_string(),
     );
-    meta.insert("indexed_paths".to_owned(), json_paths(&workspace, &paths)?);
-    meta.insert(
-        "route_file".to_owned(),
-        args.route_file
-            .as_ref()
-            .map_or_else(String::new, |p| p.display().to_string()),
-    );
-    meta.insert("file_count".to_owned(), file_count.to_string());
     meta.insert("symbol_count".to_owned(), symbol_count.to_string());
     meta.insert("ref_count".to_owned(), ref_count.to_string());
-    meta.insert("diagnostic_count".to_owned(), diagnostic_count.to_string());
     meta.insert("jobs".to_owned(), args.jobs.to_string());
     meta.insert(
         "tu_limit".to_owned(),
@@ -175,8 +128,20 @@ fn main() -> Result<()> {
         .to_owned(),
     );
     meta.insert(
+        "libclang_warnings".to_owned(),
+        if args.libclang_warnings { "yes" } else { "no" }.to_owned(),
+    );
+    meta.insert(
         "semantic_elapsed_seconds".to_owned(),
         format!("{semantic_elapsed:.3}"),
+    );
+    meta.insert(
+        "commit_elapsed_seconds".to_owned(),
+        format!("{commit_elapsed:.3}"),
+    );
+    meta.insert(
+        "total_elapsed_seconds".to_owned(),
+        format!("{total_elapsed:.3}"),
     );
     for (key, value) in meta {
         conn.execute(
@@ -186,7 +151,7 @@ fn main() -> Result<()> {
     }
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
     println!(
-        "已索引 backend=libclang files={file_count} symbols={symbol_count} refs={ref_count} diagnostics={diagnostic_count} db={}",
+        "已索引 backend=libclang symbols={symbol_count} refs={ref_count} db={}",
         db.display()
     );
     Ok(())

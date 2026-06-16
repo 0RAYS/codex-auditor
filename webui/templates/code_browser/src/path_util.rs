@@ -36,27 +36,11 @@ pub fn rel(workspace: &Path, path: &Path) -> Result<String> {
         .replace('\\', "/"))
 }
 
-pub fn in_workspace(workspace: &Path, path: &Path) -> bool {
-    fs::canonicalize(path)
-        .ok()
-        .and_then(|p| p.strip_prefix(workspace).ok().map(|_| ()))
-        .is_some()
-}
-
 pub fn ext(path: &Path) -> String {
     path.extension()
         .and_then(|v| v.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase()
-}
-
-pub fn source_lang(path: &Path) -> Option<&'static str> {
-    match ext(path).as_str() {
-        "c" => Some("c"),
-        "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Some("cpp"),
-        "h" => Some("c-header"),
-        _ => None,
-    }
 }
 
 pub fn is_c_family(path: &Path) -> bool {

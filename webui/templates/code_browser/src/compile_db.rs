@@ -74,6 +74,7 @@ fn clang_resource_dir() -> String {
 pub fn load_compile_commands(
     path: Option<&Path>,
     workspace: &Path,
+    suppress_libclang_warnings: bool,
 ) -> Result<(Vec<CompileCommand>, String)> {
     let Some(path) = path else {
         return Ok((Vec::new(), String::new()));
@@ -112,7 +113,13 @@ pub fn load_compile_commands(
         } else {
             vec!["clang".to_owned(), source.display().to_string()]
         };
-        let args = clean_compile_args(&raw_args, &directory, &source, &resource_dir);
+        let args = clean_compile_args(
+            &raw_args,
+            &directory,
+            &source,
+            &resource_dir,
+            suppress_libclang_warnings,
+        );
         commands.push(CompileCommand { source, args });
     }
     Ok((commands, path.display().to_string()))
@@ -191,6 +198,7 @@ fn clean_compile_args(
     directory: &Path,
     source: &Path,
     resource_dir: &str,
+    suppress_libclang_warnings: bool,
 ) -> Vec<String> {
     let args = compiler_payload(raw_args);
     let path_taking_opts = [
@@ -276,6 +284,9 @@ fn clean_compile_args(
     {
         cleaned.push("-resource-dir".to_owned());
         cleaned.push(resource_dir.to_owned());
+    }
+    if suppress_libclang_warnings && !cleaned.iter().any(|arg| arg == "-w") {
+        cleaned.push("-w".to_owned());
     }
     cleaned
 }

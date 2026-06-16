@@ -1,10 +1,8 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-use crate::path_util::rel;
 
 const SECURITY_TERMS: &[&str] = &[
     "security", "cve", "overflow", "oob", "uaf", "race", "crash", "fuzz", "sanitize", "bounds",
@@ -123,12 +121,4 @@ fn commit_hints(subject: &str, files: &[String]) -> (Vec<String>, String) {
         .collect::<Vec<_>>();
     let signal = hints.join(",");
     (hints, signal)
-}
-
-pub fn json_paths(workspace: &Path, paths: &[PathBuf]) -> Result<String> {
-    let values = paths
-        .iter()
-        .map(|path| rel(workspace, path).unwrap_or_else(|_| path.display().to_string()))
-        .collect::<Vec<_>>();
-    Ok(serde_json::to_string(&values)?)
 }

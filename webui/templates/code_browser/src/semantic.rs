@@ -7,18 +7,18 @@ use std::fs;
 use std::os::raw::{c_uint, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use crate::compile_db::CompileCommand;
 use crate::db::count_table;
-use crate::path_util::{ext, in_workspace, is_c_family, rel};
+use crate::path_util::{ext, is_c_family, rel};
 
 #[derive(Default, Debug)]
 struct TuRows {
     symbols: Vec<SymbolRow>,
     refs: Vec<RefRow>,
-    diagnostics: Vec<DiagnosticRow>,
 }
 
 #[derive(Debug)]
@@ -28,11 +28,6 @@ struct SymbolRow {
     kind: String,
     path: String,
     line: u32,
-    column: u32,
-    extent_start_line: u32,
-    extent_start_column: u32,
-    extent_end_line: u32,
-    extent_end_column: u32,
     is_definition: bool,
     type_text: String,
     signature: String,
@@ -45,26 +40,25 @@ struct RefRow {
     kind: String,
     path: String,
     line: u32,
-    column: u32,
     context: String,
-}
-
-#[derive(Debug)]
-struct DiagnosticRow {
-    path: Option<String>,
-    line: u32,
-    column: u32,
-    severity: u32,
-    message: String,
 }
 
 struct VisitState<'a> {
     workspace: &'a Path,
     rows: &'a mut TuRows,
     source_cache: HashMap<PathBuf, Vec<String>>,
+    path_cache: HashMap<PathBuf, PathInfo>,
     main_source: PathBuf,
     header_claims: Arc<Mutex<HashSet<PathBuf>>>,
     claimed_headers: HashSet<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct PathInfo {
+    canonical: PathBuf,
+    relative: Option<String>,
+    is_c_family: bool,
+    is_header: bool,
 }
 
 pub fn index_translation_units(
@@ -74,22 +68,28 @@ pub fn index_translation_units(
     jobs: usize,
     batch_size: usize,
     detailed_processing_record: bool,
-) -> Result<(usize, usize, usize)> {
+) -> Result<(usize, usize)> {
     if commands.is_empty() {
-        return Ok((0, 0, 0));
+        return Ok((0, 0));
     }
     let header_claims = Arc::new(Mutex::new(HashSet::new()));
     let worker_count = jobs.min(commands.len()).max(1);
     let (result_tx, result_rx) = mpsc::channel::<(PathBuf, TuRows)>();
     let commands = Arc::new(commands.to_vec());
+    let next_index = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
-    for worker_id in 0..worker_count {
+    for _ in 0..worker_count {
         let commands = Arc::clone(&commands);
+        let next_index = Arc::clone(&next_index);
         let result_tx = result_tx.clone();
         let workspace = workspace.to_path_buf();
         let header_claims = Arc::clone(&header_claims);
         handles.push(thread::spawn(move || {
-            for index in (worker_id..commands.len()).step_by(worker_count) {
+            loop {
+                let index = next_index.fetch_add(1, Ordering::Relaxed);
+                if index >= commands.len() {
+                    break;
+                }
                 let command = &commands[index];
                 let rows = extract_translation_unit_rows(
                     &workspace,
@@ -105,19 +105,10 @@ pub fn index_translation_units(
 
     let mut symbol_rows = Vec::new();
     let mut ref_rows = Vec::new();
-    let mut diagnostic_rows = Vec::new();
     for (source, rows) in result_rx {
         symbol_rows.extend(rows.symbols);
         ref_rows.extend(rows.refs);
-        diagnostic_rows.extend(rows.diagnostics);
-        flush_semantic_rows(
-            conn,
-            &mut symbol_rows,
-            &mut ref_rows,
-            &mut diagnostic_rows,
-            false,
-            batch_size,
-        )?;
+        flush_semantic_rows(conn, &mut symbol_rows, &mut ref_rows, false, batch_size)?;
         if handles.iter().any(thread::JoinHandle::is_finished) {
             // Finished handles are joined below; this branch keeps clippy from suggesting no-op progress logic.
             let _ = &source;
@@ -125,28 +116,11 @@ pub fn index_translation_units(
     }
     for handle in handles {
         if handle.join().is_err() {
-            diagnostic_rows.push(DiagnosticRow {
-                path: None,
-                line: 0,
-                column: 0,
-                severity: 4,
-                message: "fatal: index worker panicked".to_owned(),
-            });
+            eprintln!("libclang diagnostic: <unknown>:0:0: fatal: index worker panicked");
         }
     }
-    flush_semantic_rows(
-        conn,
-        &mut symbol_rows,
-        &mut ref_rows,
-        &mut diagnostic_rows,
-        true,
-        batch_size,
-    )?;
-    Ok((
-        count_table(conn, "symbols")?,
-        count_table(conn, "refs")?,
-        count_table(conn, "diagnostics")?,
-    ))
+    flush_semantic_rows(conn, &mut symbol_rows, &mut ref_rows, true, batch_size)?;
+    Ok((count_table(conn, "symbols")?, count_table(conn, "refs")?))
 }
 
 fn extract_translation_unit_rows(
@@ -159,11 +133,11 @@ fn extract_translation_unit_rows(
     let source_c = match path_to_cstring(&command.source) {
         Ok(value) => value,
         Err(exc) => {
-            rows.diagnostics.push(parse_error_row(
+            emit_parse_error(
                 workspace,
                 &command.source,
                 &format!("invalid source path: {exc}"),
-            ));
+            );
             return rows;
         }
     };
@@ -175,11 +149,11 @@ fn extract_translation_unit_rows(
     {
         Ok(value) => value,
         Err(exc) => {
-            rows.diagnostics.push(parse_error_row(
+            emit_parse_error(
                 workspace,
                 &command.source,
                 &format!("invalid compiler argument: {exc}"),
-            ));
+            );
             return rows;
         }
     };
@@ -192,11 +166,7 @@ fn extract_translation_unit_rows(
     unsafe {
         let index = clang_createIndex(0, 0);
         if index.is_null() {
-            rows.diagnostics.push(parse_error_row(
-                workspace,
-                &command.source,
-                "libclang create index failed",
-            ));
+            emit_parse_error(workspace, &command.source, "libclang create index failed");
             return rows;
         }
         let mut tu: CXTranslationUnit = ptr::null_mut();
@@ -211,20 +181,21 @@ fn extract_translation_unit_rows(
             &mut tu,
         );
         if error != CXError_Success || tu.is_null() {
-            rows.diagnostics.push(parse_error_row(
+            emit_parse_error(
                 workspace,
                 &command.source,
                 &format!("libclang parse failed: CXErrorCode={error}"),
-            ));
+            );
             clang_disposeIndex(index);
             return rows;
         }
-        extract_diagnostics(workspace, tu, &mut rows);
+        emit_diagnostics(workspace, tu);
         let cursor = clang_getTranslationUnitCursor(tu);
         let mut state = VisitState {
             workspace,
             rows: &mut rows,
             source_cache: HashMap::new(),
+            path_cache: HashMap::new(),
             main_source: command.source.clone(),
             header_claims,
             claimed_headers: HashSet::new(),
@@ -242,46 +213,49 @@ extern "C" fn visit_child(
     client_data: CXClientData,
 ) -> CXChildVisitResult {
     let state = unsafe { &mut *(client_data as *mut VisitState<'_>) };
-    let Some((path, line, column)) = cursor_location(cursor) else {
+    let kind = unsafe { clang_getCursorKind(cursor) };
+    let is_declaration = is_declaration_kind(kind);
+    let is_reference = is_reference_kind(kind);
+    if !is_declaration && !is_reference {
+        return CXChildVisit_Recurse;
+    }
+    let Some((path, line)) = cursor_location(cursor) else {
         return CXChildVisit_Recurse;
     };
-    if !in_workspace(state.workspace, &path) {
+    let info = cached_path_info(state, &path).clone();
+    let Some(rpath) = info.relative.clone() else {
+        return CXChildVisit_Continue;
+    };
+    if !should_visit_file(state, &info) {
         return CXChildVisit_Continue;
     }
-    if !should_visit_file(state, &path) {
-        return CXChildVisit_Continue;
-    }
-    let rpath = match rel(state.workspace, &path) {
-        Ok(value) => value,
-        Err(_) => return CXChildVisit_Continue,
-    };
-    let kind = unsafe { clang_getCursorKind(cursor) };
-    let spelling = cursor_spelling(cursor);
-    let display_name = cursor_display_name(cursor);
-    let name = if spelling.is_empty() {
-        display_name.clone()
-    } else {
-        spelling.clone()
-    };
-    if is_declaration_kind(kind) && !name.is_empty() {
-        let (start_line, start_column, end_line, end_column) = cursor_extent(cursor);
+    if is_declaration {
+        let spelling = cursor_spelling(cursor);
+        let display_name = if spelling.is_empty() || cursor_needs_signature(kind) {
+            cursor_display_name(cursor)
+        } else {
+            String::new()
+        };
+        let name = if spelling.is_empty() {
+            display_name.clone()
+        } else {
+            spelling.clone()
+        };
+        if name.is_empty() {
+            return CXChildVisit_Recurse;
+        }
         state.rows.symbols.push(SymbolRow {
             usr: cursor_usr(cursor),
             name: name.clone(),
             kind: kind_spelling(kind),
             path: rpath.clone(),
             line,
-            column,
-            extent_start_line: start_line,
-            extent_start_column: start_column,
-            extent_end_line: end_line,
-            extent_end_column: end_column,
             is_definition: unsafe { clang_isCursorDefinition(cursor) != 0 },
             type_text: cursor_type_spelling(cursor),
             signature: cursor_signature(cursor, &display_name, &spelling),
         });
     }
-    if is_reference_kind(kind) {
+    if is_reference {
         let referenced = unsafe { clang_getCursorReferenced(cursor) };
         if unsafe { clang_Cursor_isNull(referenced) } == 0 {
             let ref_usr = cursor_usr(referenced);
@@ -289,21 +263,23 @@ extern "C" fn visit_child(
                 let referenced_spelling = cursor_spelling(referenced);
                 if !referenced_spelling.is_empty() {
                     referenced_spelling
-                } else if !spelling.is_empty() {
-                    spelling
                 } else {
-                    display_name
+                    let spelling = cursor_spelling(cursor);
+                    if !spelling.is_empty() {
+                        spelling
+                    } else {
+                        cursor_display_name(cursor)
+                    }
                 }
             };
             if !ref_usr.is_empty() && !ref_name.is_empty() {
-                let context = line_context(&path, line, &mut state.source_cache);
+                let context = line_context(&info.canonical, line, &mut state.source_cache);
                 state.rows.refs.push(RefRow {
                     referenced_usr: ref_usr,
                     name: ref_name,
                     kind: kind_spelling(kind),
                     path: rpath,
                     line,
-                    column,
                     context,
                 });
             }
@@ -312,18 +288,48 @@ extern "C" fn visit_child(
     CXChildVisit_Recurse
 }
 
-fn should_visit_file(state: &mut VisitState<'_>, path: &Path) -> bool {
-    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if canonical == state.main_source {
+fn cached_path_info<'a>(state: &'a mut VisitState<'_>, path: &Path) -> &'a PathInfo {
+    state
+        .path_cache
+        .entry(path.to_path_buf())
+        .or_insert_with(|| build_path_info(state.workspace, path))
+}
+
+fn build_path_info(workspace: &Path, path: &Path) -> PathInfo {
+    let Ok(canonical) = fs::canonicalize(path) else {
+        return PathInfo {
+            canonical: path.to_path_buf(),
+            relative: None,
+            is_c_family: false,
+            is_header: false,
+        };
+    };
+    let relative = canonical
+        .strip_prefix(workspace)
+        .ok()
+        .map(|value| value.to_string_lossy().replace('\\', "/"));
+    let is_c_family = is_c_family(&canonical);
+    let is_header = matches!(ext(&canonical).as_str(), "h" | "hh" | "hpp" | "hxx");
+    PathInfo {
+        canonical,
+        relative,
+        is_c_family,
+        is_header,
+    }
+}
+
+fn should_visit_file(state: &mut VisitState<'_>, info: &PathInfo) -> bool {
+    let canonical = &info.canonical;
+    if *canonical == state.main_source {
         return true;
     }
-    if !is_c_family(&canonical) {
+    if !info.is_c_family {
         return false;
     }
-    if !matches!(ext(&canonical).as_str(), "h" | "hh" | "hpp" | "hxx") {
+    if !info.is_header {
         return false;
     }
-    if state.claimed_headers.contains(&canonical) {
+    if state.claimed_headers.contains(canonical) {
         return true;
     }
     let mut claims = state
@@ -331,7 +337,7 @@ fn should_visit_file(state: &mut VisitState<'_>, path: &Path) -> bool {
         .lock()
         .expect("header claim mutex poisoned");
     if claims.insert(canonical.clone()) {
-        state.claimed_headers.insert(canonical);
+        state.claimed_headers.insert(canonical.clone());
         true
     } else {
         false
@@ -342,17 +348,12 @@ fn path_to_cstring(path: &Path) -> std::result::Result<CString, std::ffi::NulErr
     CString::new(path.to_string_lossy().as_bytes())
 }
 
-fn parse_error_row(workspace: &Path, source: &Path, message: &str) -> DiagnosticRow {
-    DiagnosticRow {
-        path: Some(rel(workspace, source).unwrap_or_else(|_| source.display().to_string())),
-        line: 0,
-        column: 0,
-        severity: 4,
-        message: format!("fatal: {message}"),
-    }
+fn emit_parse_error(workspace: &Path, source: &Path, message: &str) {
+    let path = rel(workspace, source).unwrap_or_else(|_| source.display().to_string());
+    eprintln!("libclang diagnostic: {path}:0:0: fatal: {message}");
 }
 
-fn extract_diagnostics(workspace: &Path, tu: CXTranslationUnit, rows: &mut TuRows) {
+fn emit_diagnostics(workspace: &Path, tu: CXTranslationUnit) {
     unsafe {
         let count = clang_getNumDiagnostics(tu);
         for i in 0..count {
@@ -361,19 +362,17 @@ fn extract_diagnostics(workspace: &Path, tu: CXTranslationUnit, rows: &mut TuRow
             let (path, line, column) = source_location(workspace, loc);
             let severity = clang_getDiagnosticSeverity(diagnostic) as u32;
             let spelling = cx_string(clang_getDiagnosticSpelling(diagnostic));
-            rows.diagnostics.push(DiagnosticRow {
-                path,
-                line,
-                column,
-                severity,
-                message: format!("{}: {spelling}", severity_name(severity)),
-            });
+            eprintln!(
+                "libclang diagnostic: {}:{line}:{column}: {}: {spelling}",
+                path.unwrap_or_else(|| "<unknown>".to_owned()),
+                severity_name(severity),
+            );
             clang_disposeDiagnostic(diagnostic);
         }
     }
 }
 
-fn cursor_location(cursor: CXCursor) -> Option<(PathBuf, u32, u32)> {
+fn cursor_location(cursor: CXCursor) -> Option<(PathBuf, u32)> {
     unsafe {
         let loc = clang_getCursorLocation(cursor);
         let mut file: CXFile = ptr::null_mut();
@@ -388,7 +387,7 @@ fn cursor_location(cursor: CXCursor) -> Option<(PathBuf, u32, u32)> {
         if name.is_empty() {
             None
         } else {
-            Some((PathBuf::from(name), line, column))
+            Some((PathBuf::from(name), line))
         }
     }
 }
@@ -411,17 +410,6 @@ fn source_location(workspace: &Path, loc: CXSourceLocation) -> (Option<String>, 
             let display = rel(workspace, &path).unwrap_or_else(|_| path.display().to_string());
             (Some(display), line, column)
         }
-    }
-}
-
-fn cursor_extent(cursor: CXCursor) -> (u32, u32, u32, u32) {
-    unsafe {
-        let extent = clang_getCursorExtent(cursor);
-        let start = clang_getRangeStart(extent);
-        let end = clang_getRangeEnd(extent);
-        let (_, start_line, start_column) = source_location(Path::new("/"), start);
-        let (_, end_line, end_column) = source_location(Path::new("/"), end);
-        (start_line, start_column, end_line, end_column)
     }
 }
 
@@ -558,6 +546,17 @@ fn is_declaration_kind(kind: CXCursorKind) -> bool {
     .contains(&kind)
 }
 
+fn cursor_needs_signature(kind: CXCursorKind) -> bool {
+    [
+        CXCursor_FunctionDecl,
+        CXCursor_CXXMethod,
+        CXCursor_Constructor,
+        CXCursor_Destructor,
+        CXCursor_FunctionTemplate,
+    ]
+    .contains(&kind)
+}
+
 fn is_reference_kind(kind: CXCursorKind) -> bool {
     [
         CXCursor_DeclRefExpr,
@@ -599,13 +598,11 @@ fn flush_semantic_rows(
     conn: &Connection,
     symbol_rows: &mut Vec<SymbolRow>,
     ref_rows: &mut Vec<RefRow>,
-    diagnostic_rows: &mut Vec<DiagnosticRow>,
     force: bool,
     batch_size: usize,
 ) -> Result<()> {
     while (!symbol_rows.is_empty() && (force || symbol_rows.len() >= batch_size))
         || (!ref_rows.is_empty() && (force || ref_rows.len() >= batch_size))
-        || (!diagnostic_rows.is_empty() && (force || diagnostic_rows.len() >= batch_size))
     {
         let tx = conn.unchecked_transaction()?;
         if !symbol_rows.is_empty() && (force || symbol_rows.len() >= batch_size) {
@@ -613,11 +610,9 @@ fn flush_semantic_rows(
             let mut stmt = tx.prepare(
                 r#"
                 INSERT OR IGNORE INTO symbols(
-                  usr, name, kind, path, line, column,
-                  extent_start_line, extent_start_column, extent_end_line, extent_end_column,
-                  is_definition, type, signature, backend
+                  usr, name, kind, path, line, is_definition, type, signature
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'libclang')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
             for row in symbol_rows.drain(..chunk_size) {
@@ -627,11 +622,6 @@ fn flush_semantic_rows(
                     row.kind,
                     row.path,
                     row.line,
-                    row.column,
-                    row.extent_start_line,
-                    row.extent_start_column,
-                    row.extent_end_line,
-                    row.extent_end_column,
                     i32::from(row.is_definition),
                     row.type_text,
                     row.signature,
@@ -641,7 +631,7 @@ fn flush_semantic_rows(
         if !ref_rows.is_empty() && (force || ref_rows.len() >= batch_size) {
             let chunk_size = if force { ref_rows.len() } else { batch_size };
             let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO refs(referenced_usr, name, kind, path, line, column, context) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO refs(referenced_usr, name, kind, path, line, context) VALUES (?, ?, ?, ?, ?, ?)",
             )?;
             for row in ref_rows.drain(..chunk_size) {
                 stmt.execute(params![
@@ -650,25 +640,7 @@ fn flush_semantic_rows(
                     row.kind,
                     row.path,
                     row.line,
-                    row.column,
                     row.context,
-                ])?;
-            }
-        }
-        if !diagnostic_rows.is_empty() && (force || diagnostic_rows.len() >= batch_size) {
-            let chunk_size = if force {
-                diagnostic_rows.len()
-            } else {
-                batch_size
-            };
-            let mut stmt = tx.prepare("INSERT INTO diagnostics(path, line, column, severity, message) VALUES (?, ?, ?, ?, ?)")?;
-            for row in diagnostic_rows.drain(..chunk_size) {
-                stmt.execute(params![
-                    row.path,
-                    row.line,
-                    row.column,
-                    row.severity,
-                    row.message
                 ])?;
             }
         }

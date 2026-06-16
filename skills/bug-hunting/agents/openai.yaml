@@ -1,0 +1,4 @@
+interface:
+  display_name: "漏洞挖掘"
+  short_description: "指导二进制漏洞挖掘循环"
+  default_prompt: "使用 $bug-hunting 推进二进制漏洞挖掘循环。"

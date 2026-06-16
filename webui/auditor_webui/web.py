@@ -1,30 +1,44 @@
 """Flask application factory and HTTP routes."""
 
+# mypy: disable-error-code="import-not-found,untyped-decorator"
+
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
+from pathlib import Path
 from typing import cast
 
 from flask import Flask, Response, jsonify, request
 from flask.typing import ResponseReturnValue
 from werkzeug.exceptions import HTTPException
 
-from .codex_runner import is_session_active, start_agent_run, stop_agent_run
+from .codex_runner import expand_note_sync, start_agent_run, stop_agent_run
 from .config import CONFIG
 from .database import (
-    create_session,
+    connect_db,
+    create_debug_session,
+    create_target_with_default_session,
     delete_session,
+    delete_target,
     get_existing_session,
+    get_existing_target,
     get_settings,
     init_db,
     list_messages,
-    list_sessions,
+    list_state_tree,
+    mark_intervention_detected,
+    mark_intervention_notice_read,
+    mark_target_mining_sessions_error,
+    running_auto_mining_session_ids,
     set_setting,
-    update_session,
+    update_target_auto_mining_state,
+    update_target_note,
 )
-from .schema import BUSY_STATUSES, JsonObject, JsonValue, row_str
-from .vulnerabilities import read_vulnerabilities, unavailable_payload
+from .schema import BUSY_STATUSES, JsonObject, JsonValue, row_int, row_str
+from .scheduler import intervention_path, read_intervention_reason, start_scheduler
+from .vulnerabilities import read_vulnerabilities, unavailable_payload, update_vulnerability_rating
+from .workspace import delete_target_workspace, prepare_target_workspace, validate_target_name
 
 
 def json_response(payload: Mapping[str, object], status: int = 200) -> tuple[Response, int]:
@@ -47,8 +61,6 @@ def request_json() -> JsonObject:
 
 def current_theme() -> str:
     try:
-        from .database import connect_db
-
         with connect_db() as conn:
             settings = get_settings(conn)
     except sqlite3.Error:
@@ -98,19 +110,9 @@ def create_app() -> Flask:
 
     @app.get("/api/state")
     def api_state() -> ResponseReturnValue:
-        from .database import connect_db
-
         with connect_db() as conn:
             settings = get_settings(conn)
-        return json_response({"ok": True, "settings": settings, "sessions": list_sessions()})
-
-    @app.get("/api/sessions")
-    def api_sessions() -> ResponseReturnValue:
-        return json_response({"ok": True, "sessions": list_sessions()})
-
-    @app.post("/api/sessions")
-    def api_create_session() -> ResponseReturnValue:
-        return json_response({"ok": True, "session": create_session(request_json())}, 201)
+        return json_response({"ok": True, "settings": settings, "targets": list_state_tree()})
 
     @app.patch("/api/settings")
     def api_update_settings() -> ResponseReturnValue:
@@ -120,33 +122,139 @@ def create_app() -> Flask:
             if theme not in {"light", "dark"}:
                 raise ValueError("theme 只能是 light 或 dark")
             set_setting("theme", str(theme))
-        selected = payload.get("selected_session_id")
-        if selected is not None:
-            set_setting("selected_session_id", str(selected))
+        for key in ("selected_target_id", "selected_session_id"):
+            value = payload.get(key)
+            if value is not None:
+                set_setting(key, str(value))
         return json_response({"ok": True})
 
-    @app.get("/api/sessions/<int:session_id>")
-    def api_get_session(session_id: int) -> ResponseReturnValue:
+    @app.post("/api/targets")
+    def api_create_target() -> ResponseReturnValue:
+        payload = request_json()
+        unexpected = set(payload) - {"name", "note"}
+        if unexpected:
+            raise ValueError(f"不支持的字段: {', '.join(sorted(unexpected))}")
+        raw_name = payload.get("name")
+        if not isinstance(raw_name, str):
+            raise ValueError("目标名必须是字符串")
+        name = validate_target_name(raw_name)
+        note = str(payload.get("note", "")).strip()
+        with connect_db() as conn:
+            if conn.execute("SELECT 1 FROM targets WHERE name = ?", (name,)).fetchone():
+                raise ValueError("目标名已存在")
+        workspace_path = prepare_target_workspace(name, note)
+        try:
+            target, session = create_target_with_default_session(name, note, workspace_path)
+        except Exception:
+            delete_target_workspace(workspace_path)
+            raise
+        session_id = row_int(session, "id")
+        start_agent_run(session_id, row_str(session, "prompt"), source="scheduler")
         session = get_existing_session(session_id)
-        return json_response({"ok": True, "session": session})
+        return json_response({"ok": True, "target": target, "session": session}, 201)
 
-    @app.patch("/api/sessions/<int:session_id>")
-    def api_update_session(session_id: int) -> ResponseReturnValue:
-        return json_response({"ok": True, "session": update_session(session_id, request_json())})
+    @app.get("/api/targets/<int:target_id>")
+    def api_get_target(target_id: int) -> ResponseReturnValue:
+        return json_response({"ok": True, "target": get_existing_target(target_id)})
 
-    @app.delete("/api/sessions/<int:session_id>")
-    def api_delete_session(session_id: int) -> ResponseReturnValue:
-        get_existing_session(session_id)
-        if is_session_active(session_id):
-            raise ValueError("会话正在运行，不能删除")
-        delete_session(session_id)
+    @app.patch("/api/targets/<int:target_id>")
+    def api_update_target(target_id: int) -> ResponseReturnValue:
+        target = get_existing_target(target_id)
+        payload = request_json()
+        unexpected = set(payload) - {"note"}
+        if unexpected:
+            raise ValueError(f"不支持的字段: {', '.join(sorted(unexpected))}")
+        note = str(payload.get("note", row_str(target, "note"))).strip()
+        updated = update_target_note(target_id, note)
+        return json_response({"ok": True, "target": updated})
+
+    @app.patch("/api/targets/<int:target_id>/scheduler-state")
+    def api_update_target_scheduler_state(target_id: int) -> ResponseReturnValue:
+        payload = request_json()
+        state = str(payload.get("state", "")).strip()
+        if state not in {"running", "frozen"}:
+            raise ValueError("state 只能是 running 或 frozen")
+        return json_response({"ok": True, "target": update_target_auto_mining_state(target_id, state)})
+
+    @app.patch("/api/targets/<int:target_id>/intervention")
+    def api_trigger_intervention(target_id: int) -> ResponseReturnValue:
+        target = get_existing_target(target_id)
+        path = intervention_path(target)
+        reason = read_intervention_reason(path) if path.exists() else "未提供原因"
+        running_session_ids = running_auto_mining_session_ids(target_id)
+        updated = mark_intervention_detected(target_id, reason)
+        mark_target_mining_sessions_error(target_id, reason)
+        for session_id in running_session_ids:
+            stop_agent_run(session_id, mark_error=True)
+        return json_response({"ok": True, "target": updated})
+
+    @app.post("/api/targets/<int:target_id>/intervention/ack")
+    def api_ack_intervention(target_id: int) -> ResponseReturnValue:
+        return json_response({"ok": True, "target": mark_intervention_notice_read(target_id)})
+
+    @app.delete("/api/targets/<int:target_id>")
+    def api_delete_target(target_id: int) -> ResponseReturnValue:
+        delete_target(target_id)
         return json_response({"ok": True})
+
+    @app.post("/api/targets/expand-note")
+    def api_expand_note_new_target() -> ResponseReturnValue:
+        payload = request_json()
+        target_name = str(payload.get("name", "")).strip() or "未命名目标"
+        note = str(payload.get("note", "")).strip()
+        return json_response({"ok": True, "expanded": expand_note_sync(target_name, note)})
+
+    @app.post("/api/targets/<int:target_id>/expand-note")
+    def api_expand_note_target(target_id: int) -> ResponseReturnValue:
+        target = get_existing_target(target_id)
+        payload = request_json()
+        note = str(payload.get("note", row_str(target, "note"))).strip()
+        expanded = expand_note_sync(
+            row_str(target, "name"),
+            note,
+            workspace=Path(row_str(target, "workspace_path")),
+        )
+        return json_response({"ok": True, "expanded": expanded})
+
+    @app.post("/api/targets/<int:target_id>/sessions")
+    def api_create_debug_session(target_id: int) -> ResponseReturnValue:
+        payload = request_json()
+        session = create_debug_session(target_id, payload)
+        prompt = row_str(session, "prompt")
+        start = bool(payload.get("start", bool(prompt)))
+        if prompt and start:
+            session_id = row_int(session, "id")
+            start_agent_run(session_id, prompt, source="user")
+        return json_response({"ok": True, "session": session}, 201)
+
+    @app.get("/api/targets/<int:target_id>/vulnerabilities")
+    def api_target_vulnerabilities(target_id: int) -> ResponseReturnValue:
+        target = get_existing_target(target_id)
+        try:
+            return json_response(read_vulnerabilities(target))
+        except Exception as exc:
+            return json_response(unavailable_payload(target, str(exc)))
+
+    @app.patch("/api/targets/<int:target_id>/vulnerabilities/<row_id>")
+    def api_update_vulnerability(target_id: int, row_id: str) -> ResponseReturnValue:
+        target = get_existing_target(target_id)
+        payload = request_json()
+        fingerprint = str(payload.get("fingerprint", "")).strip()
+        if not fingerprint:
+            raise ValueError("缺少漏洞行 fingerprint")
+        rating = str(payload.get("security_rating", "")).strip()
+        return json_response(update_vulnerability_rating(target, row_id, fingerprint, rating))
 
     @app.get("/api/sessions/<int:session_id>/messages")
     def api_messages(session_id: int) -> ResponseReturnValue:
         get_existing_session(session_id)
         after = int(request.args.get("after", "0"))
         return json_response({"ok": True, "messages": list_messages(session_id, after_id=after)})
+
+    @app.delete("/api/sessions/<int:session_id>")
+    def api_delete_session(session_id: int) -> ResponseReturnValue:
+        delete_session(session_id)
+        return json_response({"ok": True})
 
     @app.post("/api/sessions/<int:session_id>/messages")
     def api_send_message(session_id: int) -> ResponseReturnValue:
@@ -157,9 +265,6 @@ def create_app() -> Flask:
         content = str(payload.get("content", "")).strip()
         if not content:
             raise ValueError("消息不能为空")
-        from .database import add_message
-
-        add_message(session_id, "user", content)
         started = start_agent_run(session_id, content, source="user")
         if not started:
             raise ValueError("当前会话已有运行中的 Codex 任务")
@@ -170,19 +275,21 @@ def create_app() -> Flask:
         get_existing_session(session_id)
         return json_response({"ok": True, "stopped": stop_agent_run(session_id)})
 
-    @app.get("/api/sessions/<int:session_id>/vulnerabilities")
-    def api_vulnerabilities(session_id: int) -> ResponseReturnValue:
+    @app.post("/api/sessions/<int:session_id>/repair-vulnerabilities")
+    def api_repair_vulnerabilities(session_id: int) -> ResponseReturnValue:
         session = get_existing_session(session_id)
-        try:
-            return json_response(read_vulnerabilities(session))
-        except Exception as exc:
-            return json_response(unavailable_payload(session, str(exc)))
+        if row_str(session, "status") in BUSY_STATUSES:
+            raise ValueError("当前会话已有运行中的任务")
+        prompt = "请检查并修复 ./archives/known_findings.md，使其符合固定四列 Markdown 表格协议。"
+        start_agent_run(session_id, prompt, source="user")
+        return json_response({"ok": True})
 
     return app
 
 
 def create_wsgi_app() -> Flask:
     init_db()
+    start_scheduler()
     return create_app()
 
 

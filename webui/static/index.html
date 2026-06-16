@@ -13,29 +13,16 @@
         <div class="brand">
           <div>
             <h1>Codex Auditor</h1>
-            <p>自动化审计会话</p>
+            <p>Target / Session</p>
           </div>
-          <button id="themeToggle" class="icon-button" type="button" title="切换主题">◐</button>
+          <button id="themeToggle" class="icon-button" type="button" title="切换到暗色" aria-label="切换到暗色">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5 8.5 8.5 0 1 0 20.5 14.3Z"></path>
+            </svg>
+          </button>
         </div>
-
-        <button id="newSessionButton" class="primary-button" type="button">+ 新建会话</button>
-
-        <form id="sessionForm" class="session-form hidden">
-          <label>
-            名称
-            <input id="sessionName" name="name" autocomplete="off" placeholder="可选">
-          </label>
-          <label>
-            标识符
-            <input id="sessionIdentifier" name="identifier" autocomplete="off" placeholder="LIBSSH" required>
-          </label>
-          <div class="form-actions">
-            <button class="secondary-button" type="button" id="cancelSessionButton">取消</button>
-            <button class="primary-button" type="submit">保存</button>
-          </div>
-        </form>
-
-        <div id="sessionList" class="session-list"></div>
+        <button id="newTargetButton" class="primary-button full-button" type="button">新建目标</button>
+        <div id="targetTree" class="target-tree"></div>
       </aside>
 
       <main class="main-pane">
@@ -43,55 +30,102 @@
           <div class="pane-header">
             <div>
               <h2>漏洞列表</h2>
-              <p id="vulnerabilityMeta">未选择会话</p>
+              <p id="vulnerabilityMeta">未选择目标</p>
             </div>
-            <button id="refreshVulnerabilities" class="refresh-button" type="button" aria-label="刷新漏洞列表" title="刷新">
-              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20 11a8 8 0 0 0-13.5-5.8L4 7.7"></path>
-                <path d="M4 4v3.7h3.7"></path>
-                <path d="M4 13a8 8 0 0 0 13.5 5.8L20 16.3"></path>
-                <path d="M20 20v-3.7h-3.7"></path>
-              </svg>
-            </button>
+            <div class="header-actions">
+              <button id="refreshVulnerabilities" class="icon-button" type="button" title="刷新" aria-label="刷新漏洞列表">
+                <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 11a8 8 0 0 0-13.5-5.8L4 7.7"></path>
+                  <path d="M4 4v3.7h3.7"></path>
+                  <path d="M4 13a8 8 0 0 0 13.5 5.8L20 16.3"></path>
+                  <path d="M20 20v-3.7h-3.7"></path>
+                </svg>
+              </button>
+            </div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>编号</th>
-                  <th>危害</th>
-                  <th>类型</th>
-                  <th>模块</th>
-                  <th>难度</th>
-                  <th>EXP</th>
-                  <th>概要</th>
+                  <th>总结</th>
+                  <th>漏洞类型</th>
+                  <th>安全评分</th>
+                  <th>源文件</th>
                 </tr>
               </thead>
               <tbody id="vulnerabilityRows">
-                <tr><td colspan="7" class="empty-cell">暂无数据</td></tr>
+                <tr><td colspan="4" class="empty-cell">暂无数据</td></tr>
               </tbody>
             </table>
           </div>
         </section>
 
         <section class="chat-pane">
-          <div class="pane-header chat-header">
-            <h2>对话预览</h2>
-          </div>
           <div id="messages" class="messages"></div>
           <form id="messageForm" class="message-form">
             <button id="stopButton" class="stop-button" type="button" aria-label="停止当前运行" disabled></button>
             <input id="messageInput" autocomplete="off" placeholder="输入消息" disabled>
-            <button id="sendButton" class="send-button" type="submit" aria-label="发送消息" title="发送" disabled>
-              <svg class="button-icon send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 20V5"></path>
-                <path d="M6.8 10.2 12 5l5.2 5.2"></path>
-              </svg>
-            </button>
+            <button id="sendButton" class="send-button" type="submit" aria-label="发送消息" title="发送" disabled>↑</button>
           </form>
         </section>
       </main>
     </div>
+
+    <dialog id="targetModal" class="modal">
+      <form id="targetForm" method="dialog" class="modal-body">
+        <header class="modal-header">
+          <h3>新建目标</h3>
+          <button class="icon-button" type="button" data-close="targetModal">×</button>
+        </header>
+        <label>目标名称<input id="targetName" autocomplete="off" required></label>
+        <label>补充说明<textarea id="targetNote"></textarea></label>
+        <div id="targetExpandBox" class="expand-box hidden">
+          <label>AI 扩写结果<textarea id="targetExpanded" readonly></textarea></label>
+          <button id="copyTargetExpanded" class="secondary-button" type="button">复制到补充说明</button>
+        </div>
+        <div class="form-actions">
+          <button class="secondary-button" type="button" data-close="targetModal">取消</button>
+          <button id="expandTargetNote" class="secondary-button" type="button">AI 扩写补充说明</button>
+          <button class="primary-button" type="submit">确定</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="noteModal" class="modal">
+      <form id="noteForm" method="dialog" class="modal-body">
+        <header class="modal-header">
+          <h3 id="noteModalTitle">更新补充说明</h3>
+          <button class="icon-button" type="button" data-close="noteModal">×</button>
+        </header>
+        <label>补充说明<textarea id="noteText"></textarea></label>
+        <div id="noteExpandBox" class="expand-box hidden">
+          <label>AI 扩写结果<textarea id="noteExpanded" readonly></textarea></label>
+          <button id="copyNoteExpanded" class="secondary-button" type="button">复制到补充说明</button>
+        </div>
+        <div class="form-actions">
+          <button class="secondary-button" type="button" data-close="noteModal">取消</button>
+          <button id="expandExistingNote" class="secondary-button" type="button">AI 扩写补充说明</button>
+          <button class="primary-button" type="submit">确定</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="debugModal" class="modal">
+      <form id="debugForm" method="dialog" class="modal-body">
+        <header class="modal-header">
+          <h3 id="debugModalTitle">新建 debug session</h3>
+          <button class="icon-button" type="button" data-close="debugModal">×</button>
+        </header>
+        <label>会话名<input id="debugName" autocomplete="off" placeholder="debug"></label>
+        <label>初始提示词<textarea id="debugPrompt"></textarea></label>
+        <label class="check-row"><input id="debugStart" type="checkbox" checked> 创建后立即发送初始提示词</label>
+        <div class="form-actions">
+          <button class="secondary-button" type="button" data-close="debugModal">取消</button>
+          <button class="primary-button" type="submit">确定</button>
+        </div>
+      </form>
+    </dialog>
+
     <div id="toast" class="toast hidden"></div>
     <script src="static/app.js"></script>
   </body>

@@ -1,7 +1,0 @@
-interface:
-  display_name: "Overall Report"
-  short_description: "Maintain audit OVERALL.md and overall.json."
-  default_prompt: "Use $overall-report-skill to update a Chinese audit OVERALL.md table and regenerate overall.json."
-
-policy:
-  allow_implicit_invocation: true

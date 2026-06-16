@@ -1,2 +1,5 @@
 .claude/
-__pycache__/
+__pycache__
+queue.sqlite
+.TASK.md
+webui/templates/code_browser/target/

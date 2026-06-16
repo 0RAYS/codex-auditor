@@ -1,0 +1,4 @@
+interface:
+  display_name: "漏洞确认"
+  short_description: "验证并打包漏洞候选"
+  default_prompt: "使用 $bug-confirming 验证并打包漏洞候选。"

@@ -2,34 +2,69 @@
 
 from __future__ import annotations
 
-from .config import CONFIG
-from .schema import RowDict, row_str
+from textwrap import dedent
+
+from .schema import RowDict, row_int, row_str
 
 
-def base_prompt(session: RowDict, user_prompt: str, *, first_turn: bool) -> str:
-    identifier = row_str(session, "identifier")
-    heading = "这是该 WebUI 会话的首次请求。" if first_turn else "这是该 WebUI 会话的后续请求。"
-    audit_prefix = CONFIG.audit_dir / f"{identifier}-xxx"
-    summary_dir = CONFIG.audit_dir / f"{identifier}-000"
-    return f"""你正在执行 codex-auditor 自动化二进制安全审计会话。{heading}
+def base_prompt(
+    session: RowDict,
+    user_prompt: str,
+    *,
+    source: str = "user",
+) -> str:
+    if source == "user":
+        return user_prompt
 
-目标标识符: {identifier}
+    target_name = row_str(session, "target_name")
+    target_id = row_int(session, "target_id")
+    workspace_path = row_str(session, "target_workspace_path")
+    note = row_str(session, "target_note")
 
-必须遵守:
-- 阅读并遵守 {CONFIG.agents_path}。
-- 本 WebUI 当前配置的工作目录、审计目录优先级高于环境文档中的默认路径。
-- 所有审计报告写入 {audit_prefix}。
-- 每轮结束前维护 {summary_dir}/COVERAGE.md、OVERALL.md、REMINDER.md。
-- 更新 OVERALL.md 后根据 {CONFIG.skills_dir}/overall-report-skill/SKILL.md 生成 overall.json。
-- 如果任务没有完成，不要只做泛泛总结；继续推进最有价值的审计路径。
+    general = dedent(
+        f"""
+        你正在执行 codex-auditor 自动化二进制安全审计会话。
 
-用户消息:
-{user_prompt}
-"""
+        目标: {target_name}
+        目标 ID: {target_id}
+        目标工作区: {workspace_path}
 
+        - 需要人工介入时，先写 ./human_intervention.json 说明 reason，再调用 WebUI PATCH API: PATCH /api/targets/$AUDITOR_TARGET_ID/intervention。
+        - 如果任务没有完成，不要只做泛泛总结；继续推进最有价值的审计路径。
 
-def auto_continue_prompt(reason: str) -> str:
-    return f"""停顿判断器认为当前不需要等待用户，原因: {reason}
+        目标补充说明:
+        {note or "无"}
+        """,
+    ).strip()
 
-请继续当前审计任务，优先推进尚未完成的路径；
-结束前继续维护标识符-000 下的 COVERAGE.md、OVERALL.md、REMINDER.md，并确保 overall.json 已更新。"""
+    checklist = dedent(
+        """
+        如果以下任务未完成, 则你是项目初始化负责人, 以下是你的checklist。
+
+        1. 拉取目标程序完整源码并编译，要求 asan、release 和 debug 三个版本，配置好尽可能可用的调试环境。
+        2. 配置好 code_browser 和 verify，确保 pytest 通过且工具可用。
+        3. 运行长任务时, 使用 thread automation, 运行结束后读取最后一段输出来判断是否成功。
+        """,
+    ).strip()
+
+    structure = dedent(
+        """
+        ## 目录结构与协议
+
+        - `code_browser/`：目标无关源码索引和查询 CLI。
+        - `verify/`：PoC、输入文件、harness 和目标二进制的命令矩阵验证器。
+        - `report_template/`：候选漏洞产物模板。
+        - `archives/known_findings.md`：整理的全部发现集合。
+        - `archives/known_fails.md`：整理的全部失败集合。
+        - `archives/{id}-{description}`：候选漏洞产物目录。
+        - `vuln.md`：记录攻击面和后续审计结果。
+        - `$bug-confirming`：候选漏洞落地指南。
+        - `$bug-hunting`：漏洞挖掘指导。
+        - 使用 $bug-hunting 指导漏洞挖掘，候选漏洞落地时使用 $bug-confirming。
+        """,
+    ).strip()
+
+    blocks = [general]
+    blocks.append(checklist)
+    blocks.append(structure)
+    return "\n\n".join(blocks)

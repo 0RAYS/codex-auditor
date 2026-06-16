@@ -6,7 +6,11 @@
 
 ## 快速开始
 
+推荐自己从仓库build
 ```bash
+docker build . -t codex-auditor
+docker volume create codex-data
+
 docker run -d \
   --name binary-audit \
   -p 8981:8981 \
@@ -15,7 +19,7 @@ docker run -d \
   -e OPENAI_BASE_URL="https://your.api.dist/v1" \
   -e PASSWORD="yourpassword" \
   -v codex-data:/data \
-  rocketdev/0rays-codex-auditor:latest
+  codex-auditor
 ```
 
 需要注意的是, 如果/data如果不挂载, 存储的配置会丢失.

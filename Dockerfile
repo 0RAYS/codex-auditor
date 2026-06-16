@@ -71,7 +71,7 @@ COPY configs/vimrc /root/.vimrc
 COPY configs/gdbinit /root/.gdbinit
 COPY webui/ /root/webui/
 COPY vim-plugins.tar.zst /tmp/vim-plugins.tar.zst
-COPY AGENTS.md /data/codex/AGENTS.md
+COPY configs/AGENTS.md /data/codex/AGENTS.md
 RUN chmod +x /init /tmux.sh && touch /root/.bash_profile && chsh -s /usr/bin/zsh root && \
     bsdtar -xf /tmp/vim-plugins.tar.zst -C /root
 

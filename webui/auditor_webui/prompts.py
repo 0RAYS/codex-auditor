@@ -42,7 +42,7 @@ def base_prompt(
         如果以下任务未完成, 则你是项目初始化负责人, 以下是你的checklist。
 
         1. 拉取目标程序完整源码并编译，要求 asan、release 和 debug 三个版本，配置好尽可能可用的调试环境。
-        2. 配置好 code_browser 和 verify，确保 pytest 通过且工具可用。
+        2. 使用全局 `xref` 命令为目标工作区建立 `xref.db` 索引，配置好 verify，确保 pytest 通过且工具可用。
         3. 运行长任务时, 使用 thread automation, 运行结束后读取最后一段输出来判断是否成功。
         """,
     ).strip()
@@ -51,7 +51,7 @@ def base_prompt(
         """
         ## 目录结构与协议
 
-        - `code_browser/`：目标无关源码索引和查询 CLI。
+        - `xref`：全局源码索引和查询命令，数据库位于目标工作区根目录的 `xref.db`。
         - `verify/`：PoC、输入文件、harness 和目标二进制的命令矩阵验证器。
         - `report_template/`：候选漏洞产物模板。
         - `archives/known_findings.md`：整理的全部发现集合。

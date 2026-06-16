@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 
 
-CODE_BROWSER_DIR = Path(__file__).resolve().parent
-CARGO_MANIFEST = CODE_BROWSER_DIR / "Cargo.toml"
-QUERY = CODE_BROWSER_DIR / "query.py"
+XREF_DIR = Path(__file__).resolve().parent
+CARGO_MANIFEST = XREF_DIR / "Cargo.toml"
+QUERY = XREF_DIR / "query.py"
 
 
 def project_root() -> Path:
-    value = os.environ.get("CODE_BROWSER_PROJECT")
+    value = os.environ.get("XREF_PROJECT") or os.environ.get("CODE_BROWSER_PROJECT")
     if not value:
-        pytest.skip("set CODE_BROWSER_PROJECT=/path/to/C-or-CXX-project")
+        pytest.skip("set XREF_PROJECT=/path/to/C-or-CXX-project")
     root = Path(value).expanduser().resolve()
     if not root.exists():
         pytest.skip(f"CODE_BROWSER_PROJECT does not exist: {root}")
@@ -42,13 +42,13 @@ def build_index_cmd(*args: str) -> list[str]:
 
 
 def build_timeout() -> int:
-    return int(os.environ.get("CODE_BROWSER_BUILD_TIMEOUT", "240"))
+    return int(os.environ.get("XREF_BUILD_TIMEOUT", os.environ.get("CODE_BROWSER_BUILD_TIMEOUT", "240")))
 
 
 @pytest.fixture(scope="session")
 def indexed_db(tmp_path_factory):
     root = project_root()
-    db = tmp_path_factory.mktemp("code_browser") / "code_browser.sqlite"
+    db = tmp_path_factory.mktemp("xref") / "xref.db"
     proc = subprocess.run(
         build_index_cmd("--workspace", str(root), "--db", str(db)),
         text=True,
@@ -115,7 +115,7 @@ def test_c_family_test_and_fuzz_translation_units_are_indexed(tmp_path):
         {"directory": str(root), "file": str(fuzz / "fuzz_main.c"), "arguments": ["cc", "-c", str(fuzz / "fuzz_main.c")]},
     ]
     (root / "compile_commands.json").write_text(json.dumps(commands), encoding="utf-8")
-    db = tmp_path / "code_browser.sqlite"
+    db = tmp_path / "xref.db"
 
     proc = subprocess.run(
         build_index_cmd("--workspace", str(root), "--db", str(db)),
@@ -143,7 +143,7 @@ def test_c_family_test_and_fuzz_translation_units_are_indexed(tmp_path):
 def test_tu_limit_restricts_semantic_indexing(tmp_path):
     root = tmp_path / "project"
     write_two_source_project(root)
-    db = tmp_path / "code_browser.sqlite"
+    db = tmp_path / "xref.db"
 
     proc = subprocess.run(
         build_index_cmd("--workspace", str(root), "--db", str(db), "--jobs", "1", "--tu-limit", "1"),

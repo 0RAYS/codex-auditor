@@ -8,8 +8,8 @@ description: 指导二进制安全审计 agent 对开源原生目标执行漏洞
 ## 审计循环
 
 1. 检查目标源码、测试、构建文件、发布历史和已知公告。
-   - 优先用 `code_browser/query.py` 做机械查询：`meta`、`context`、`file`、`route`、`symbol`、`refs`、`tests`、`commits`。
-   - 当 code browser 过期、不可用或结果过粗时，回退到 `rg`、语言服务器、调试器或项目专用工具。
+   - 优先用全局 `xref` 命令做机械查询：`meta`、`context`、`file`、`route`、`symbol`、`refs`、`tests`、`commits`；数据库位于目标工作区根目录的 `xref.db`。
+   - 当 xref 过期、不可用或结果过粗时，回退到 `rg`、语言服务器、调试器或项目专用工具。
    - 读取 `./archives/known_fails.md`、`./archives/known_findings.md` 和 `./vuln.md`，复用前序工作并去重。
 
 2. 选择一个小漏洞假设。

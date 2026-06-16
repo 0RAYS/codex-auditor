@@ -18,7 +18,7 @@ use git_index::{git_metadata, index_commits};
 use path_util::PathCache;
 use semantic::index_translation_units;
 
-const DEFAULT_DB: &str = "code_browser/code_browser.sqlite";
+const DEFAULT_DB: &str = "xref.db";
 
 #[derive(Parser, Debug)]
 #[command(about = "构建面向 C/C++ 审计的 libclang 语义索引。")]

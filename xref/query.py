@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 
-DEFAULT_DB = Path("code_browser") / "code_browser.sqlite"
+DEFAULT_DB = Path("xref.db")
 LOCATION_RE = re.compile(r"^(?P<path>.+):(?P<start>\d+)(?:-(?P<end>\d+))?$")
 
 
@@ -23,7 +23,8 @@ def connect(db: Path):
     if not db.exists():
         raise SystemExit(
             f"找不到索引: {db}\n"
-            "请先运行 cargo run --release --manifest-path code_browser/Cargo.toml --bin build_index --"
+            "请先运行 xref 索引命令，或用源码执行: "
+            "cargo run --release --manifest-path xref/Cargo.toml --bin build_index --"
         )
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row

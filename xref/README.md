@@ -1,7 +1,10 @@
-# C/C++ 语义代码浏览器
+# xref
 
 这是一个本地 SQLite 索引和 CLI，用于收集 C/C++ 审计事实。主后端使用 `libclang` 解析
 `compile_commands.json`，索引符号、定义和引用；同时保留近期 commit 辅助信息。
+
+索引数据库默认位于目标 workspace 根目录的 `xref.db`。`--workspace /目标/路径` 会把相对
+`--db` 解析到该 workspace 下，而不是当前 shell 的 `cwd`。
 
 ## 生成 compile_commands.json
 
@@ -20,18 +23,17 @@ bear -- make
 `build_index` 默认会在 workspace、`build/`、`out/` 等常见位置查找 `compile_commands.json`，也可以显式指定：
 
 ```sh
-cargo run --release --manifest-path code_browser/Cargo.toml --bin build_index -- \
+cargo run --release --manifest-path xref/Cargo.toml --bin build_index -- \
   --workspace /目标/路径 \
   --compile-commands /目标/路径/build/compile_commands.json \
-  --db /目标/路径/code_browser/code_browser.sqlite
+  --db xref.db
 ```
 
 ## 构建索引
 
 ```sh
-cargo run --release --manifest-path code_browser/Cargo.toml --bin build_index -- \
+cargo run --release --manifest-path xref/Cargo.toml --bin build_index -- \
   --workspace /目标/路径 \
-  --db /目标/路径/code_browser/code_browser.sqlite \
   --max-commits 500
 ```
 
@@ -43,13 +45,13 @@ libclang 解析失败或诊断会在构建时输出到 stderr，不写入 SQLite
 ## 查询示例
 
 ```sh
-python3 code_browser/query.py --workspace /目标/路径 meta
-python3 code_browser/query.py --workspace /目标/路径 symbols parse_header
-python3 code_browser/query.py --workspace /目标/路径 def parse_header
-python3 code_browser/query.py --workspace /目标/路径 refs 'c:@F@parse_header'
-python3 code_browser/query.py --workspace /目标/路径 context src/foo.c:120-150
-python3 code_browser/query.py --workspace /目标/路径 context parse_header
-python3 code_browser/query.py --workspace /目标/路径 commits parser --limit 20
+python3 xref/query.py --workspace /目标/路径 meta
+python3 xref/query.py --workspace /目标/路径 symbols parse_header
+python3 xref/query.py --workspace /目标/路径 def parse_header
+python3 xref/query.py --workspace /目标/路径 refs 'c:@F@parse_header'
+python3 xref/query.py --workspace /目标/路径 context src/foo.c:120-150
+python3 xref/query.py --workspace /目标/路径 context parse_header
+python3 xref/query.py --workspace /目标/路径 commits parser --limit 20
 ```
 
 `refs <name>` 如果匹配多个不同 USR，会打印候选并要求改用 `refs <usr>`，避免把不同同名符号的引用静默合并。
@@ -59,7 +61,7 @@ python3 code_browser/query.py --workspace /目标/路径 commits parser --limit 
 对任意已拉取的 C/C++ 项目运行：
 
 ```sh
-CODE_BROWSER_PROJECT=/目标/路径 pytest code_browser/test_code_browser_usability.py
+XREF_PROJECT=/目标/路径 pytest xref/test_xref_usability.py
 ```
 
 如果项目没有 `compile_commands.json`，测试会 skip。

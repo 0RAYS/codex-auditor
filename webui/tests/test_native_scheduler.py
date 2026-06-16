@@ -646,7 +646,11 @@ def test_workspace_no_longer_creates_or_updates_init_md(app_modules):
     payload = response.get_json()
     target = payload["target"]
     init_path = Path(target["workspace_path"], "init.md")
+    workspace_path = Path(target["workspace_path"])
     assert not init_path.exists()
+    assert not (workspace_path / "code_browser").exists()
+    assert not (workspace_path / "xref").exists()
+    assert not (WEBUI_ROOT / "templates" / "code_browser").exists()
     assert not (WEBUI_ROOT / "templates" / "init.md").exists()
 
     response = client.patch(f"/api/targets/{target['id']}", json={"note": "更新说明"})

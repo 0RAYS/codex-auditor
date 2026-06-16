@@ -137,20 +137,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "code_browser"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clang-sys",
- "clap",
- "rusqlite",
- "serde",
- "serde_json",
- "shell-words",
- "walkdir",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -545,6 +531,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "xref"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clang-sys",
+ "clap",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "walkdir",
 ]
 
 [[package]]

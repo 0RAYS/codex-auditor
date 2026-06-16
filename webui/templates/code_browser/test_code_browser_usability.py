@@ -75,6 +75,20 @@ def run_query(root: Path, db: Path, *args: str) -> str:
     return proc.stdout
 
 
+def write_two_source_project(root: Path):
+    src = root / "src"
+    src.mkdir(parents=True)
+    first = src / "first.c"
+    second = src / "second.c"
+    first.write_text("int alpha_helper(void) { return 7; }\nint alpha_main(void) { return alpha_helper(); }\n", encoding="utf-8")
+    second.write_text("int beta_helper(void) { return 11; }\nint beta_main(void) { return beta_helper(); }\n", encoding="utf-8")
+    commands = [
+        {"directory": str(root), "file": str(first), "arguments": ["cc", "-c", str(first)]},
+        {"directory": str(root), "file": str(second), "arguments": ["cc", "-c", str(second)]},
+    ]
+    (root / "compile_commands.json").write_text(json.dumps(commands), encoding="utf-8")
+
+
 def test_target_test_files_are_skipped(tmp_path):
     root = tmp_path / "project"
     src = root / "src"
@@ -127,6 +141,67 @@ def test_target_test_files_are_skipped(tmp_path):
     )
     assert proc.returncode != 0
     assert "invalid choice" in proc.stderr
+
+
+def test_tu_limit_restricts_semantic_indexing(tmp_path):
+    pytest.importorskip("clang.cindex")
+    root = tmp_path / "project"
+    write_two_source_project(root)
+    db = tmp_path / "code_browser.sqlite"
+
+    proc = subprocess.run(
+        ["python3", str(BUILD_INDEX), "--workspace", str(root), "--db", str(db), "--jobs", "1", "--tu-limit", "1"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    handle = sqlite3.connect(db)
+    try:
+        meta = {row[0]: row[1] for row in handle.execute("SELECT key, value FROM meta")}
+        assert meta["compile_command_count"] == "1"
+        assert meta["tu_limit"] == "1"
+        compile_db_files = {row[0] for row in handle.execute("SELECT path FROM files WHERE in_compile_db = 1")}
+        assert compile_db_files == {"src/first.c", "src/second.c"}
+        names = {row[0] for row in handle.execute("SELECT name FROM symbols")}
+        assert "alpha_helper" in names
+        assert "beta_helper" not in names
+    finally:
+        handle.close()
+
+
+def test_parallel_and_serial_index_same_rows(tmp_path):
+    pytest.importorskip("clang.cindex")
+    root = tmp_path / "project"
+    write_two_source_project(root)
+    serial_db = tmp_path / "serial.sqlite"
+    parallel_db = tmp_path / "parallel.sqlite"
+
+    for db, jobs in ((serial_db, "1"), (parallel_db, "2")):
+        proc = subprocess.run(
+            ["python3", str(BUILD_INDEX), "--workspace", str(root), "--db", str(db), "--jobs", jobs],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    def indexed_rows(db: Path, table: str, columns: str):
+        handle = sqlite3.connect(db)
+        try:
+            return set(handle.execute(f"SELECT {columns} FROM {table}").fetchall())
+        finally:
+            handle.close()
+
+    assert indexed_rows(serial_db, "symbols", "usr, name, kind, path, line, column, is_definition") == indexed_rows(
+        parallel_db, "symbols", "usr, name, kind, path, line, column, is_definition"
+    )
+    assert indexed_rows(serial_db, "refs", "referenced_usr, name, kind, path, line, column, context") == indexed_rows(
+        parallel_db, "refs", "referenced_usr, name, kind, path, line, column, context"
+    )
 
 
 def sample_definitions(conn, limit: int = 12):

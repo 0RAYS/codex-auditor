@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import concurrent.futures
 import hashlib
 import json
+import os
 import re
 import shlex
 import sqlite3
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,6 +73,13 @@ class CompileCommand:
     source: Path
     directory: Path
     args: list[str]
+
+
+@dataclass
+class TuRows:
+    symbols: list[tuple]
+    refs: list[tuple]
+    diagnostics: list[tuple]
 
 
 def resolve_workspace(value: str) -> Path:
@@ -359,6 +369,13 @@ def load_routes(route_file: Path | None):
     return routes
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
 def commit_hints(subject: str, files: list[str]) -> tuple[list[str], str]:
     haystack = (subject + " " + " ".join(files)).lower()
     hints = [term for term in SECURITY_TERMS if term in haystack]
@@ -456,14 +473,34 @@ def severity_name(value: int) -> str:
     return {0: "ignored", 1: "note", 2: "warning", 3: "error", 4: "fatal"}.get(value, str(value))
 
 
-def index_translation_units(conn: sqlite3.Connection, workspace: Path, commands: list[CompileCommand]) -> tuple[int, int, int]:
-    if not commands:
-        return 0, 0, 0
+def count_table(conn: sqlite3.Connection, table: str) -> int:
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def flush_batch(conn: sqlite3.Connection, sql: str, rows: list[tuple], batch_size: int, force: bool = False):
+    while rows and (force or len(rows) >= batch_size):
+        chunk_size = len(rows) if force else batch_size
+        conn.executemany(sql, rows[:chunk_size])
+        del rows[:chunk_size]
+
+
+def parse_options(cindex, detailed_processing_record: bool) -> int:
+    if detailed_processing_record:
+        return cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
+    return 0
+
+
+def extract_translation_unit_rows(args: tuple[str, CompileCommand, bool]) -> TuRows:
+    workspace_value, command, detailed_processing_record = args
+    workspace = Path(workspace_value)
+    rows = TuRows(symbols=[], refs=[], diagnostics=[])
+    source_cache: dict[Path, list[str]] = {}
     try:
         from clang import cindex
     except Exception as exc:
-        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("libclang_error", str(exc)))
-        return 0, 0, 0
+        rpath = rel(workspace, command.source) if in_workspace(workspace, command.source) else str(command.source)
+        rows.diagnostics.append((rpath, 0, 0, 4, f"libclang import failed: {exc}"))
+        return rows
 
     declaration_kinds = {
         cindex.CursorKind.FUNCTION_DECL,
@@ -494,107 +531,155 @@ def index_translation_units(conn: sqlite3.Connection, workspace: Path, commands:
     }
 
     index = cindex.Index.create()
-    symbol_count = 0
-    ref_count = 0
-    diag_count = 0
-    source_cache: dict[Path, list[str]] = {}
+    try:
+        tu = index.parse(str(command.source), args=command.args, options=parse_options(cindex, detailed_processing_record))
+    except Exception as exc:
+        rpath = rel(workspace, command.source) if in_workspace(workspace, command.source) else str(command.source)
+        rows.diagnostics.append((rpath, 0, 0, 4, f"libclang parse failed: {exc}"))
+        return rows
 
-    for command in commands:
-        try:
-            tu = index.parse(str(command.source), args=command.args, options=cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
-        except Exception as exc:
-            rpath = rel(workspace, command.source) if in_workspace(workspace, command.source) else str(command.source)
-            conn.execute(
-                "INSERT INTO diagnostics(path, line, column, severity, message) VALUES (?, ?, ?, ?, ?)",
-                (rpath, 0, 0, 4, f"libclang parse failed: {exc}"),
+    for diagnostic in tu.diagnostics:
+        loc = diagnostic.location
+        path = None
+        if loc and loc.file:
+            dpath = Path(str(loc.file.name)).resolve()
+            path = rel(workspace, dpath) if in_workspace(workspace, dpath) else str(dpath)
+        rows.diagnostics.append(
+            (
+                path,
+                int(loc.line or 0),
+                int(loc.column or 0),
+                int(diagnostic.severity),
+                f"{severity_name(int(diagnostic.severity))}: {diagnostic.spelling}",
             )
-            diag_count += 1
+        )
+
+    stack = [tu.cursor]
+    while stack:
+        cursor = stack.pop()
+        location = cursor_location(cursor)
+        if not location:
+            stack.extend(reversed(list(cursor.get_children())))
+            continue
+        path, line, column = location
+        if not in_workspace(workspace, path):
             continue
 
-        for diagnostic in tu.diagnostics:
-            loc = diagnostic.location
-            path = None
-            if loc and loc.file:
-                dpath = Path(str(loc.file.name)).resolve()
-                path = rel(workspace, dpath) if in_workspace(workspace, dpath) else str(dpath)
-            conn.execute(
-                "INSERT INTO diagnostics(path, line, column, severity, message) VALUES (?, ?, ?, ?, ?)",
-                (path, int(loc.line or 0), int(loc.column or 0), int(diagnostic.severity), f"{severity_name(int(diagnostic.severity))}: {diagnostic.spelling}"),
+        stack.extend(reversed(list(cursor.get_children())))
+        rpath = rel(workspace, path)
+        spelling = cursor.spelling or cursor.displayname or ""
+
+        if cursor.kind in declaration_kinds and spelling:
+            start_line, start_col, end_line, end_col = cursor_extent(cursor)
+            try:
+                type_text = cursor.type.spelling or ""
+            except Exception:
+                type_text = ""
+            rows.symbols.append(
+                (
+                    cursor_usr(cursor),
+                    spelling,
+                    str(cursor.kind).split(".")[-1],
+                    rpath,
+                    line,
+                    column,
+                    start_line,
+                    start_col,
+                    end_line,
+                    end_col,
+                    1 if cursor.is_definition() else 0,
+                    type_text,
+                    cursor_signature(cursor),
+                )
             )
-            diag_count += 1
 
-        stack = [tu.cursor]
-        while stack:
-            cursor = stack.pop()
-            stack.extend(reversed(list(cursor.get_children())))
-            location = cursor_location(cursor)
-            if not location:
+        if cursor.kind in reference_kinds:
+            referenced = cursor.referenced
+            if not referenced:
                 continue
-            path, line, column = location
-            if not in_workspace(workspace, path):
+            ref_usr = cursor_usr(referenced)
+            ref_name = referenced.spelling or cursor.spelling or cursor.displayname or ""
+            if not ref_usr or not ref_name:
                 continue
-            rpath = rel(workspace, path)
-            spelling = cursor.spelling or cursor.displayname or ""
+            rows.refs.append(
+                (
+                    ref_usr,
+                    ref_name,
+                    str(cursor.kind).split(".")[-1],
+                    rpath,
+                    line,
+                    column,
+                    line_context(path, line, source_cache),
+                )
+            )
 
-            if cursor.kind in declaration_kinds and spelling:
-                start_line, start_col, end_line, end_col = cursor_extent(cursor)
+    return rows
+
+
+def index_translation_units(
+    conn: sqlite3.Connection,
+    workspace: Path,
+    commands: list[CompileCommand],
+    jobs: int,
+    batch_size: int,
+    detailed_processing_record: bool,
+) -> tuple[int, int, int]:
+    if not commands:
+        return 0, 0, 0
+    try:
+        from clang import cindex  # noqa: F401
+    except Exception as exc:
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("libclang_error", str(exc)))
+        return 0, 0, 0
+
+    symbol_sql = """
+        INSERT OR IGNORE INTO symbols(
+          usr, name, kind, path, line, column,
+          extent_start_line, extent_start_column, extent_end_line, extent_end_column,
+          is_definition, type, signature, backend
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'libclang')
+    """
+    ref_sql = """
+        INSERT OR IGNORE INTO refs(referenced_usr, name, kind, path, line, column, context)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """
+    diagnostic_sql = "INSERT INTO diagnostics(path, line, column, severity, message) VALUES (?, ?, ?, ?, ?)"
+    symbol_rows: list[tuple] = []
+    ref_rows: list[tuple] = []
+    diagnostic_rows: list[tuple] = []
+
+    def write_rows(rows: TuRows):
+        symbol_rows.extend(rows.symbols)
+        ref_rows.extend(rows.refs)
+        diagnostic_rows.extend(rows.diagnostics)
+        flush_batch(conn, symbol_sql, symbol_rows, batch_size)
+        flush_batch(conn, ref_sql, ref_rows, batch_size)
+        flush_batch(conn, diagnostic_sql, diagnostic_rows, batch_size)
+
+    if jobs <= 1 or len(commands) <= 1:
+        for command in commands:
+            write_rows(extract_translation_unit_rows((str(workspace), command, detailed_processing_record)))
+    else:
+        max_workers = min(jobs, len(commands))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(extract_translation_unit_rows, (str(workspace), command, detailed_processing_record)): command
+                for command in commands
+            }
+            for future in concurrent.futures.as_completed(futures):
+                command = futures[future]
                 try:
-                    type_text = cursor.type.spelling or ""
-                except Exception:
-                    type_text = ""
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO symbols(
-                      usr, name, kind, path, line, column,
-                      extent_start_line, extent_start_column, extent_end_line, extent_end_column,
-                      is_definition, type, signature, backend
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'libclang')
-                    """,
-                    (
-                        cursor_usr(cursor),
-                        spelling,
-                        str(cursor.kind).split(".")[-1],
-                        rpath,
-                        line,
-                        column,
-                        start_line,
-                        start_col,
-                        end_line,
-                        end_col,
-                        1 if cursor.is_definition() else 0,
-                        type_text,
-                        cursor_signature(cursor),
-                    ),
-                )
-                symbol_count += 1 if conn.execute("SELECT changes()").fetchone()[0] else 0
+                    write_rows(future.result())
+                except Exception as exc:
+                    rpath = rel(workspace, command.source) if in_workspace(workspace, command.source) else str(command.source)
+                    diagnostic_rows.append((rpath, 0, 0, 4, f"index worker failed: {exc}"))
+                    flush_batch(conn, diagnostic_sql, diagnostic_rows, batch_size)
 
-            if cursor.kind in reference_kinds:
-                referenced = cursor.referenced
-                if not referenced:
-                    continue
-                ref_usr = cursor_usr(referenced)
-                ref_name = referenced.spelling or cursor.spelling or cursor.displayname or ""
-                if not ref_usr or not ref_name:
-                    continue
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO refs(referenced_usr, name, kind, path, line, column, context)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ref_usr,
-                        ref_name,
-                        str(cursor.kind).split(".")[-1],
-                        rpath,
-                        line,
-                        column,
-                        line_context(path, line, source_cache),
-                    ),
-                )
-                ref_count += 1 if conn.execute("SELECT changes()").fetchone()[0] else 0
-
-    return symbol_count, ref_count, diag_count
+    flush_batch(conn, symbol_sql, symbol_rows, batch_size, force=True)
+    flush_batch(conn, ref_sql, ref_rows, batch_size, force=True)
+    flush_batch(conn, diagnostic_sql, diagnostic_rows, batch_size, force=True)
+    return count_table(conn, "symbols"), count_table(conn, "refs"), count_table(conn, "diagnostics")
 
 
 def main():
@@ -607,6 +692,15 @@ def main():
     parser.add_argument("--route-file", type=Path, help="包含 pattern/skill/reason 条目的 JSON 路由文件。")
     parser.add_argument("--max-commits", type=int, default=500)
     parser.add_argument("--limit", type=int, help="Limit indexed files for quick validation.")
+    parser.add_argument("--tu-limit", type=positive_int, help="Limit compile commands used for semantic indexing.")
+    parser.add_argument("--jobs", type=positive_int, default=min(os.cpu_count() or 1, 8), help="Semantic indexing worker count.")
+    parser.add_argument("--batch-size", type=positive_int, default=5000, help="SQLite executemany batch size.")
+    parser.add_argument(
+        "--detailed-processing-record",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use libclang PARSE_DETAILED_PROCESSING_RECORD.",
+    )
     args = parser.parse_args()
 
     workspace = resolve_workspace(args.workspace)
@@ -620,25 +714,36 @@ def main():
     compile_commands_path = find_compile_commands(workspace, args.compile_commands)
     compile_commands, compile_commands_meta = load_compile_commands(compile_commands_path, workspace)
     compile_db_sources = {rel(workspace, command.source) for command in compile_commands if in_workspace(workspace, command.source)}
+    if args.tu_limit:
+        compile_commands = compile_commands[: args.tu_limit]
 
     conn = sqlite3.connect(db)
     reset_db(conn)
     for pattern, skill, reason in load_routes(args.route_file):
         conn.execute("INSERT OR REPLACE INTO routes(pattern, skill, reason) VALUES (?, ?, ?)", (pattern, skill, reason))
 
-    file_count = 0
+    file_sql = "INSERT OR REPLACE INTO files(path, lang, sha1, size, mtime, in_compile_db) VALUES (?, ?, ?, ?, ?, ?)"
+    file_rows: list[tuple] = []
     for path in iter_files(workspace, paths, exclude_parts, args.limit):
         data = path.read_bytes()
         rpath = rel(workspace, path)
         lang = SOURCE_EXTS.get(path.suffix, "text")
         stat = path.stat()
-        conn.execute(
-            "INSERT OR REPLACE INTO files(path, lang, sha1, size, mtime, in_compile_db) VALUES (?, ?, ?, ?, ?, ?)",
-            (rpath, lang, sha1_bytes(data), stat.st_size, stat.st_mtime, 1 if rpath in compile_db_sources else 0),
-        )
-        file_count += 1
+        file_rows.append((rpath, lang, sha1_bytes(data), stat.st_size, stat.st_mtime, 1 if rpath in compile_db_sources else 0))
+        flush_batch(conn, file_sql, file_rows, args.batch_size)
+    flush_batch(conn, file_sql, file_rows, args.batch_size, force=True)
+    file_count = count_table(conn, "files")
 
-    symbol_count, ref_count, diag_count = index_translation_units(conn, workspace, compile_commands)
+    semantic_started = time.perf_counter()
+    symbol_count, ref_count, diag_count = index_translation_units(
+        conn,
+        workspace,
+        compile_commands,
+        args.jobs,
+        args.batch_size,
+        args.detailed_processing_record,
+    )
+    semantic_elapsed = time.perf_counter() - semantic_started
     index_commits(conn, workspace, args.max_commits)
 
     meta = {
@@ -652,6 +757,11 @@ def main():
         "symbol_count": str(symbol_count),
         "ref_count": str(ref_count),
         "diagnostic_count": str(diag_count),
+        "jobs": str(args.jobs),
+        "tu_limit": str(args.tu_limit or ""),
+        "batch_size": str(args.batch_size),
+        "detailed_processing_record": "yes" if args.detailed_processing_record else "no",
+        "semantic_elapsed_seconds": f"{semantic_elapsed:.3f}",
     }
     for key, value in meta.items():
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, str(value)))

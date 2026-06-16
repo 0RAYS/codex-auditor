@@ -468,13 +468,18 @@ th {
   font-weight: 700;
 }
 
-th:nth-child(2),
-td:nth-child(2) {
-  width: 140px;
+th:nth-child(1),
+td:nth-child(1) {
+  width: 84px;
 }
 
 th:nth-child(3),
 td:nth-child(3) {
+  width: 140px;
+}
+
+th:nth-child(4),
+td:nth-child(4) {
   width: 132px;
 }
 

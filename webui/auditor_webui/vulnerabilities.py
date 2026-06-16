@@ -9,7 +9,7 @@ from typing import TypedDict
 from .schema import SECURITY_RATINGS, JsonObject, JsonValue, RowDict, row_str
 from .workspace import atomic_write_text
 
-HEADERS = ("总结", "漏洞类型", "安全评分", "源文件")
+HEADERS = ("Bug ID", "总结", "漏洞类型", "安全评分", "源文件")
 
 
 class FindingRow(TypedDict):
@@ -37,17 +37,18 @@ def read_vulnerabilities(target: RowDict) -> JsonObject:
     for row in rows:
         if is_reference_finding(row["cells"]):
             continue
-        rating = row["cells"][2].strip().lower()
+        rating = row["cells"][3].strip().lower()
         findings.append(
             {
                 "row_id": row["row_id"],
                 "line_no": row["line_no"],
                 "fingerprint": row["fingerprint"],
-                "summary": row["cells"][0],
-                "bug_type": row["cells"][1],
+                "bug_id": row["cells"][0],
+                "summary": row["cells"][1],
+                "bug_type": row["cells"][2],
                 "security_rating": rating if rating in SECURITY_RATINGS else "unknown",
-                "raw_security_rating": row["cells"][2],
-                "source_files": row["cells"][3],
+                "raw_security_rating": row["cells"][3],
+                "source_files": row["cells"][4],
             },
         )
     return {
@@ -118,6 +119,27 @@ def parse_findings_table(text: str) -> list[FindingRow]:
             },
         )
     return rows
+
+
+def read_finding_bug_ids(target: RowDict) -> set[int]:
+    path = known_findings_path(target)
+    if not path.exists():
+        raise FileNotFoundError(f"未找到 {path}")
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    rows = parse_findings_table(text)
+    bug_ids: set[int] = set()
+    for row in rows:
+        if is_reference_finding(row["cells"]):
+            continue
+        raw_bug_id = row["cells"][0].strip()
+        try:
+            bug_id = int(raw_bug_id)
+        except ValueError as exc:
+            raise ValueError(f"known_findings.md 第 {row['line_no']} 行 Bug ID 不是整数") from exc
+        if bug_id < 0:
+            raise ValueError(f"known_findings.md 第 {row['line_no']} 行 Bug ID 不能为负数")
+        bug_ids.add(bug_id)
+    return bug_ids
 
 
 def is_reference_finding(cells: list[str]) -> bool:
@@ -193,7 +215,7 @@ def update_vulnerability_rating(
     lines = text.splitlines()
     line_index = row["line_no"] - 1
     cells = list(row["cells"])
-    cells[2] = normalized
+    cells[3] = normalized
     lines[line_index] = format_row(cells)
     atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
     return read_vulnerabilities(target)

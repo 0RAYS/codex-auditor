@@ -32,6 +32,7 @@ SESSION_COLUMNS = {
     "name",
     "session_type",
     "prompt",
+    "bug_ids",
     "codex_session_id",
     "status",
     "last_error",
@@ -163,6 +164,7 @@ def create_current_tables(conn: sqlite3.Connection, suffix: str = "") -> None:
             name TEXT NOT NULL,
             session_type TEXT NOT NULL,
             prompt TEXT NOT NULL DEFAULT '',
+            bug_ids TEXT NOT NULL DEFAULT '',
             codex_session_id TEXT,
             status TEXT NOT NULL DEFAULT 'finished',
             last_error TEXT,
@@ -343,6 +345,7 @@ def migrate_sessions(
                 "name": str(row.get("name") or session_type),
                 "session_type": session_type,
                 "prompt": str(row.get("prompt") or ""),
+                "bug_ids": normalize_bug_ids(row.get("bug_ids")),
                 "codex_session_id": optional_text(row.get("codex_session_id")),
                 "status": status,
                 "last_error": optional_text(row.get("last_error")),
@@ -381,10 +384,11 @@ def insert_migrated_rows(
         conn.execute(
             """
             INSERT INTO sessions_new(
-                id, target_id, name, session_type, prompt, codex_session_id, status, last_error, created_at, updated_at
+                id, target_id, name, session_type, prompt, bug_ids, codex_session_id, status, last_error, created_at,
+                updated_at
             )
             VALUES (
-                :id, :target_id, :name, :session_type, :prompt, :codex_session_id, :status, :last_error,
+                :id, :target_id, :name, :session_type, :prompt, :bug_ids, :codex_session_id, :status, :last_error,
                 :created_at, :updated_at
             )
             """,
@@ -491,6 +495,23 @@ def optional_text(value: object) -> str | None:
     return None if value is None else str(value)
 
 
+def normalize_bug_ids(value: object) -> str:
+    if value is None:
+        return ""
+    ids: set[int] = set()
+    for item in str(value).split(","):
+        stripped = item.strip()
+        if not stripped:
+            continue
+        try:
+            bug_id = int(stripped)
+        except ValueError:
+            continue
+        if bug_id >= 0:
+            ids.add(bug_id)
+    return ",".join(str(bug_id) for bug_id in sorted(ids))
+
+
 def truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -593,7 +614,7 @@ def list_state_tree() -> list[RowDict]:
             row_to_dict(row)
             for row in conn.execute(
                 """
-                SELECT id, target_id, name, session_type, prompt, codex_session_id, status,
+                SELECT id, target_id, name, session_type, prompt, bug_ids, codex_session_id, status,
                        last_error, created_at, updated_at
                 FROM sessions
                 ORDER BY target_id ASC, id ASC
@@ -985,6 +1006,24 @@ def create_run(
 def set_run_event_log_path(run_id: int, event_log_path: Path) -> None:
     with connect_db() as conn:
         conn.execute("UPDATE runs SET event_log_path = ? WHERE id = ?", (str(event_log_path), run_id))
+
+
+def append_session_bug_ids(session_id: int, bug_ids: set[int]) -> None:
+    normalized_new = {bug_id for bug_id in bug_ids if bug_id >= 0}
+    if not normalized_new:
+        return
+    timestamp = now_iso()
+    with connect_db() as conn:
+        row = conn.execute("SELECT bug_ids FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return
+        existing = normalize_bug_ids(row["bug_ids"])
+        merged = {int(item) for item in existing.split(",") if item}
+        merged.update(normalized_new)
+        conn.execute(
+            "UPDATE sessions SET bug_ids = ?, updated_at = ? WHERE id = ?",
+            (",".join(str(bug_id) for bug_id in sorted(merged)), timestamp, session_id),
+        )
 
 
 def update_run_result(

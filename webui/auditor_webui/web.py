@@ -280,7 +280,7 @@ def create_app() -> Flask:
         session = get_existing_session(session_id)
         if row_str(session, "status") in BUSY_STATUSES:
             raise ValueError("当前会话已有运行中的任务")
-        prompt = "请检查并修复 ./archives/known_findings.md，使其符合固定四列 Markdown 表格协议。"
+        prompt = "请检查并修复 ./archives/known_findings.md，使其符合固定五列 Markdown 表格协议：Bug ID / 总结 / 漏洞类型 / 安全评分 / 源文件。"
         start_agent_run(session_id, prompt, source="user")
         return json_response({"ok": True})
 

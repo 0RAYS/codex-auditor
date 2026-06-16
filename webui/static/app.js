@@ -100,7 +100,12 @@ function sessionDisplayTitle(session) {
 }
 
 function sessionSidebarTitle(session) {
-  return session.session_type === "mining" ? "mining" : "debug";
+  return session.session_type === "mining" ? "M" : "D";
+}
+
+function sessionSidebarText(session) {
+  const bugIds = (session.bug_ids || "").trim();
+  return bugIds ? `${sessionSidebarTitle(session)} ${bugIds}` : sessionSidebarTitle(session);
 }
 
 function setSelected(targetId, sessionId, persist = true) {
@@ -196,7 +201,7 @@ function renderTree() {
       selectSession.className = "session-select";
       selectSession.addEventListener("click", () => setSelected(target.id, session.id));
       selectSession.innerHTML = '<span class="session-text"></span>';
-      selectSession.querySelector(".session-text").textContent = sessionSidebarTitle(session);
+      selectSession.querySelector(".session-text").textContent = sessionSidebarText(session);
 
       const status = document.createElement("button");
       status.type = "button";
@@ -359,6 +364,7 @@ function renderVulnerabilities(payload) {
   findings.forEach((finding) => {
     const row = document.createElement("tr");
     row.append(
+      textCell(finding.bug_id || ""),
       textCell(finding.summary || ""),
       textCell(finding.bug_type || ""),
       ratingCell(finding),
@@ -406,7 +412,7 @@ function ratingCell(finding) {
 function emptyRow(message) {
   const row = document.createElement("tr");
   const cell = document.createElement("td");
-  cell.colSpan = 4;
+  cell.colSpan = 5;
   cell.className = "empty-cell";
   cell.textContent = message;
   row.appendChild(cell);
@@ -417,11 +423,11 @@ function resetVulnerabilities() {
   const target = currentTarget();
   if (!target) {
     els.vulnerabilityMeta.textContent = "未选择目标";
-    els.vulnerabilityRows.innerHTML = '<tr><td colspan="4" class="empty-cell">暂无数据</td></tr>';
+    els.vulnerabilityRows.innerHTML = '<tr><td colspan="5" class="empty-cell">暂无数据</td></tr>';
     return;
   }
   els.vulnerabilityMeta.textContent = `${target.name} · 正在读取 known_findings.md`;
-  els.vulnerabilityRows.innerHTML = '<tr><td colspan="4" class="empty-cell">正在读取漏洞列表</td></tr>';
+  els.vulnerabilityRows.innerHTML = '<tr><td colspan="5" class="empty-cell">正在读取漏洞列表</td></tr>';
 }
 
 async function loadVulnerabilities() {

@@ -31,10 +31,10 @@ description: 验证、定级、复现并打包二进制漏洞候选。用于已�
 
 ## `known_findings.md` 填写参考
 
-`./archives/known_findings.md` 保持为仅含表头的固定四列表格；不要在模板或实际归档中保留参考行。追加确认结果时使用如下格式：
+`./archives/known_findings.md` 保持为仅含表头的固定五列表格；不要在模板或实际归档中保留参考行。追加确认结果时使用如下格式。`Bug ID` 使用本目标内递增的非负整数，选择当前表中最大 Bug ID 加一；如果表中还没有漏洞，从 `0` 开始。
 
 ```markdown
-| 总结 | 漏洞类型 | 安全评分 | 源文件 |
-| --- | --- | --- | --- |
-| 在默认浅层校验下，RESTORE 接受了损坏的哈希 listpack，随后 HGETALL 在 lpAssertValidEntry 中中止崩溃。(该条仅作编写表格的参考) | crash | medium | src/rdb.c#L3254::rdbLoadObject. src/listpack.c#L1697::lpAssertValidEntry |
+| Bug ID | 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- | --- |
+| 0 | 在默认浅层校验下，RESTORE 接受了损坏的哈希 listpack，随后 HGETALL 在 lpAssertValidEntry 中中止崩溃。(该条仅作编写表格的参考) | crash | medium | src/rdb.c#L3254::rdbLoadObject. src/listpack.c#L1697::lpAssertValidEntry |
 ```

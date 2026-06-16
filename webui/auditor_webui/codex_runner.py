@@ -16,6 +16,7 @@ from typing import cast
 from .config import CONFIG, UUID_RE
 from .database import (
     add_message,
+    append_session_bug_ids,
     create_run,
     get_session,
     now_iso,
@@ -32,6 +33,7 @@ from .schema import (
     row_optional_str,
     row_str,
 )
+from .vulnerabilities import read_finding_bug_ids
 
 ACTIVE_RUNS: dict[int, subprocess.Popen[str]] = {}
 STOP_REQUESTS: set[int] = set()
@@ -257,6 +259,13 @@ def is_session_active(session_id: int) -> bool:
     return bool(proc and proc.poll() is None)
 
 
+def safe_read_finding_bug_ids(session: JsonObject) -> set[int] | None:
+    try:
+        return read_finding_bug_ids(session)
+    except Exception:
+        return None
+
+
 def start_agent_run(session_id: int, prompt: str, *, source: str) -> bool:
     with ACTIVE_LOCK:
         if session_id in ACTIVE_RUNS:
@@ -279,6 +288,7 @@ def start_agent_run(session_id: int, prompt: str, *, source: str) -> bool:
     if not rendered_prompt:
         raise ValueError("prompt 不能为空")
 
+    pre_run_bug_ids = safe_read_finding_bug_ids(session)
     started_at = now_iso()
     run_id = create_run(
         session_id=session_id,
@@ -290,12 +300,12 @@ def start_agent_run(session_id: int, prompt: str, *, source: str) -> bool:
     )
     add_message(session_id, "user", rendered_prompt)
 
-    thread = threading.Thread(target=agent_worker, args=(session_id, run_id, rendered_prompt), daemon=True)
+    thread = threading.Thread(target=agent_worker, args=(session_id, run_id, rendered_prompt, pre_run_bug_ids), daemon=True)
     thread.start()
     return True
 
 
-def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
+def agent_worker(session_id: int, run_id: int, prompt: str, pre_run_bug_ids: set[int] | None = None) -> None:
     session = get_session(session_id)
     if not session:
         return
@@ -378,6 +388,7 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
         error=error,
         stop_requested=stop_requested,
         error_stop_requested=error_stop_requested,
+        pre_run_bug_ids=pre_run_bug_ids,
     )
 
 
@@ -395,6 +406,7 @@ def finalize_agent_run(
     error: str | None,
     stop_requested: bool,
     error_stop_requested: bool = False,
+    pre_run_bug_ids: set[int] | None = None,
 ) -> None:
     output_message = ""
     if output_file.exists():
@@ -452,6 +464,11 @@ def finalize_agent_run(
     else:
         status = "error"
         last_error = error or f"Codex 返回状态 {returncode}"
+    if pre_run_bug_ids is not None:
+        session = get_session(session_id)
+        post_run_bug_ids = safe_read_finding_bug_ids(session) if session else None
+        if post_run_bug_ids is not None:
+            append_session_bug_ids(session_id, post_run_bug_ids - pre_run_bug_ids)
     update_run_result(
         session_id=session_id,
         run_id=run_id,

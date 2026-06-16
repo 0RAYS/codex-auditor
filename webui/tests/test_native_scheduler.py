@@ -165,6 +165,101 @@ def test_init_db_marks_dirty_running_sessions_and_runs_interrupted(app_modules):
     assert run["ended_at"]
 
 
+def test_init_db_sessions_table_has_bug_ids(app_modules):
+    db = app_modules["db"]
+    with db.connect_db() as conn:
+        assert "bug_ids" in db.table_columns(conn, "sessions")
+
+
+def test_init_db_migrates_old_sessions_with_empty_bug_ids(app_modules):
+    db = app_modules["db"]
+    timestamp = db.now_iso()
+    with db.connect_db() as conn:
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS runs;
+            DROP TABLE IF EXISTS messages;
+            DROP TABLE IF EXISTS sessions;
+            DROP TABLE IF EXISTS targets;
+
+            CREATE TABLE targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                note TEXT NOT NULL DEFAULT '',
+                workspace_path TEXT NOT NULL UNIQUE,
+                color_index INTEGER NOT NULL DEFAULT 0,
+                auto_mining_state TEXT NOT NULL DEFAULT 'running',
+                consecutive_nonzero_exit_count INTEGER NOT NULL DEFAULT 0,
+                last_nonzero_exit_reason TEXT NOT NULL DEFAULT '',
+                intervention_required INTEGER NOT NULL DEFAULT 0,
+                intervention_reason TEXT NOT NULL DEFAULT '',
+                intervention_notice_read INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                session_type TEXT NOT NULL,
+                prompt TEXT NOT NULL DEFAULT '',
+                codex_session_id TEXT,
+                status TEXT NOT NULL DEFAULT 'finished',
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'message',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                model TEXT NOT NULL,
+                status TEXT NOT NULL,
+                returncode INTEGER,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                codex_session_id_before TEXT,
+                codex_session_id_after TEXT,
+                event_log_path TEXT,
+                last_message TEXT,
+                error TEXT
+            );
+            """,
+        )
+        conn.execute(
+            """
+            INSERT INTO targets(id, name, workspace_path, created_at, updated_at)
+            VALUES (1, 'legacy', ?, ?, ?)
+            """,
+            (str(db.CONFIG.workspace / "legacy"), timestamp, timestamp),
+        )
+        conn.execute(
+            """
+            INSERT INTO sessions(id, target_id, name, session_type, prompt, status, created_at, updated_at)
+            VALUES (1, 1, 'legacy mining', 'mining', 'p', 'finished', ?, ?)
+            """,
+            (timestamp, timestamp),
+        )
+
+    db.init_db()
+
+    with db.connect_db() as conn:
+        row = conn.execute("SELECT bug_ids FROM sessions WHERE id = 1").fetchone()
+    assert row["bug_ids"] == ""
+
+
 def test_three_consecutive_nonzero_exits_freeze_target(app_modules):
     db = app_modules["db"]
     target, session = create_target(app_modules)
@@ -716,13 +811,167 @@ def test_vulnerability_list_filters_reference_rows(app_modules, tmp_path: Path):
     archives = tmp_path / "archives"
     archives.mkdir()
     (archives / "known_findings.md").write_text(
-        """| 总结 | 漏洞类型 | 安全评分 | 源文件 |
-| --- | --- | --- | --- |
-| 参考示例，不应展示 | crash | medium | ref.c |
-| 真实越界写 | memory corruption | high | src/a.c |
+        """| Bug ID | 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- | --- |
+| 0 | 参考示例，不应展示 | crash | medium | ref.c |
+| 1 | 真实越界写 | memory corruption | high | src/a.c |
 """,
         encoding="utf-8",
     )
     payload = vulnerabilities.read_vulnerabilities(target)
     assert payload["count"] == 1
+    assert payload["findings"][0]["bug_id"] == "1"
     assert payload["findings"][0]["summary"] == "真实越界写"
+
+
+def test_four_column_known_findings_is_protocol_mismatch(app_modules):
+    vulnerabilities = app_modules["vulnerabilities"]
+    text = """| 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- |
+| 旧协议 | crash | medium | src/a.c |
+"""
+    with pytest.raises(ValueError, match="固定表头"):
+        vulnerabilities.parse_findings_table(text)
+
+
+def test_read_finding_bug_ids_from_five_column_table(app_modules, tmp_path: Path):
+    vulnerabilities = app_modules["vulnerabilities"]
+    target = {"name": "t", "workspace_path": str(tmp_path)}
+    archives = tmp_path / "archives"
+    archives.mkdir()
+    (archives / "known_findings.md").write_text(
+        """| Bug ID | 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- | --- |
+| 2 | 真实漏洞 | crash | medium | src/a.c |
+| 0 | 另一个漏洞 | oob | high | src/b.c |
+""",
+        encoding="utf-8",
+    )
+
+    assert vulnerabilities.read_finding_bug_ids(target) == {0, 2}
+
+
+def test_finalize_agent_run_records_new_bug_id(app_modules, tmp_path: Path):
+    db = app_modules["db"]
+    runner = app_modules["runner"]
+    target, session = create_target(app_modules)
+    session_id = int(session["id"])
+    archives = Path(target["workspace_path"]) / "archives"
+    archives.mkdir(exist_ok=True)
+    (archives / "known_findings.md").write_text(
+        """| Bug ID | 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- | --- |
+| 0 | 新漏洞 | crash | medium | src/a.c |
+""",
+        encoding="utf-8",
+    )
+    run_id = db.create_run(
+        session_id=session_id,
+        source="scheduler",
+        prompt="prompt",
+        model="model",
+        started_at=db.now_iso(),
+        codex_session_id_before=None,
+    )
+
+    runner.finalize_agent_run(
+        session_id=session_id,
+        run_id=run_id,
+        output_file=tmp_path / "last.txt",
+        assistant_messages=[],
+        assistant_message_id=None,
+        discovered_session_id=None,
+        start_time=0,
+        log_file=tmp_path / "events.jsonl",
+        returncode=0,
+        error=None,
+        stop_requested=False,
+        pre_run_bug_ids=set(),
+    )
+
+    assert db.get_existing_session(session_id)["bug_ids"] == "0"
+
+
+def test_finalize_agent_run_records_sorted_deduped_new_bug_ids(app_modules, tmp_path: Path):
+    db = app_modules["db"]
+    runner = app_modules["runner"]
+    target, session = create_target(app_modules)
+    session_id = int(session["id"])
+    with db.connect_db() as conn:
+        conn.execute("UPDATE sessions SET bug_ids = '1' WHERE id = ?", (session_id,))
+    archives = Path(target["workspace_path"]) / "archives"
+    archives.mkdir(exist_ok=True)
+    (archives / "known_findings.md").write_text(
+        """| Bug ID | 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- | --- |
+| 5 | 新漏洞 C | crash | medium | src/c.c |
+| 1 | 旧漏洞 | oob | high | src/a.c |
+| 2 | 新漏洞 B | uaf | high | src/b.c |
+""",
+        encoding="utf-8",
+    )
+    run_id = db.create_run(
+        session_id=session_id,
+        source="scheduler",
+        prompt="prompt",
+        model="model",
+        started_at=db.now_iso(),
+        codex_session_id_before=None,
+    )
+
+    runner.finalize_agent_run(
+        session_id=session_id,
+        run_id=run_id,
+        output_file=tmp_path / "last.txt",
+        assistant_messages=[],
+        assistant_message_id=None,
+        discovered_session_id=None,
+        start_time=0,
+        log_file=tmp_path / "events.jsonl",
+        returncode=0,
+        error=None,
+        stop_requested=False,
+        pre_run_bug_ids={1},
+    )
+
+    assert db.get_existing_session(session_id)["bug_ids"] == "1,2,5"
+
+
+def test_finalize_agent_run_keeps_bug_ids_empty_without_new_ids(app_modules, tmp_path: Path):
+    db = app_modules["db"]
+    runner = app_modules["runner"]
+    target, session = create_target(app_modules)
+    session_id = int(session["id"])
+    archives = Path(target["workspace_path"]) / "archives"
+    archives.mkdir(exist_ok=True)
+    (archives / "known_findings.md").write_text(
+        """| Bug ID | 总结 | 漏洞类型 | 安全评分 | 源文件 |
+| --- | --- | --- | --- | --- |
+""",
+        encoding="utf-8",
+    )
+    run_id = db.create_run(
+        session_id=session_id,
+        source="scheduler",
+        prompt="prompt",
+        model="model",
+        started_at=db.now_iso(),
+        codex_session_id_before=None,
+    )
+
+    runner.finalize_agent_run(
+        session_id=session_id,
+        run_id=run_id,
+        output_file=tmp_path / "last.txt",
+        assistant_messages=[],
+        assistant_message_id=None,
+        discovered_session_id=None,
+        start_time=0,
+        log_file=tmp_path / "events.jsonl",
+        returncode=0,
+        error=None,
+        stop_requested=False,
+        pre_run_bug_ids=set(),
+    )
+
+    assert db.get_existing_session(session_id)["bug_ids"] == ""

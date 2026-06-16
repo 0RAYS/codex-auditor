@@ -54,7 +54,7 @@ def base_prompt(
         - `xref`：全局源码索引和查询命令，数据库位于目标工作区根目录的 `xref.db`。
         - `verify/`：PoC、输入文件、harness 和目标二进制的命令矩阵验证器。
         - `report_template/`：候选漏洞产物模板。
-        - `archives/known_findings.md`：整理的全部发现集合。
+        - `archives/known_findings.md`：整理的全部发现集合，固定五列为 `Bug ID / 总结 / 漏洞类型 / 安全评分 / 源文件`。
         - `archives/known_fails.md`：整理的全部失败集合。
         - `archives/{id}-{description}`：候选漏洞产物目录。
         - `vuln.md`：记录攻击面和后续审计结果。

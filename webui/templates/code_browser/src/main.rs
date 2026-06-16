@@ -15,6 +15,7 @@ use std::time::Instant;
 use compile_db::{find_compile_commands, load_compile_commands};
 use db::reset_db;
 use git_index::{git_metadata, index_commits};
+use path_util::PathCache;
 use semantic::index_translation_units;
 
 const DEFAULT_DB: &str = "code_browser/code_browser.sqlite";
@@ -64,6 +65,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let workspace = fs::canonicalize(&args.workspace)
         .with_context(|| format!("无法解析 workspace: {}", args.workspace.display()))?;
+    let path_cache = PathCache::new();
     let db = if args.db.is_absolute() {
         args.db.clone()
     } else {
@@ -74,10 +76,12 @@ fn main() -> Result<()> {
             .with_context(|| format!("无法创建数据库目录: {}", parent.display()))?;
     }
 
-    let compile_commands_path = find_compile_commands(&workspace, args.compile_commands.as_deref());
+    let compile_commands_path =
+        find_compile_commands(&workspace, args.compile_commands.as_deref(), &path_cache);
     let (mut compile_commands, compile_commands_meta) = load_compile_commands(
         compile_commands_path.as_deref(),
         &workspace,
+        &path_cache,
         !args.libclang_warnings,
     )?;
     if let Some(limit) = args.tu_limit {
@@ -93,6 +97,7 @@ fn main() -> Result<()> {
         &conn,
         &workspace,
         &compile_commands,
+        &path_cache,
         args.jobs,
         args.batch_size,
         args.detailed_processing_record,

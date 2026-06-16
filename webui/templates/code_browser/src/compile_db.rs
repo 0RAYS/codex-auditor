@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
-use crate::path_util::{DEFAULT_EXCLUDE_PARTS, absolutize_path, is_c_family, should_skip};
+use crate::path_util::{
+    DEFAULT_EXCLUDE_PARTS, PathCache, absolutize_path, is_c_family, should_skip,
+};
 
 #[derive(Clone, Debug)]
 pub struct CompileCommand {
@@ -22,18 +24,22 @@ struct CompileCommandJson {
     command: Option<String>,
 }
 
-pub fn find_compile_commands(workspace: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
+pub fn find_compile_commands(
+    workspace: &Path,
+    explicit: Option<&Path>,
+    path_cache: &PathCache,
+) -> Option<PathBuf> {
     if let Some(path) = explicit {
-        return Some(absolutize_path(workspace, path));
+        return Some(path_cache.canonicalize_or_original(&absolutize_path(workspace, path)));
     }
     let direct = workspace.join("compile_commands.json");
     if direct.exists() {
-        return Some(direct);
+        return Some(path_cache.canonicalize_or_original(&direct));
     }
     for name in ["build", "cmake-build-debug", "cmake-build-release", "out"] {
         let candidate = workspace.join(name).join("compile_commands.json");
         if candidate.exists() {
-            return Some(candidate);
+            return Some(path_cache.canonicalize_or_original(&candidate));
         }
     }
     for entry in WalkDir::new(workspace).into_iter().filter_map(Result::ok) {
@@ -41,7 +47,7 @@ pub fn find_compile_commands(workspace: &Path, explicit: Option<&Path>) -> Optio
             && entry.file_name() == "compile_commands.json"
             && !should_skip(entry.path(), &default_excludes_without_build_out())
         {
-            return Some(entry.path().to_path_buf());
+            return Some(path_cache.canonicalize_or_original(entry.path()));
         }
     }
     None
@@ -74,6 +80,7 @@ fn clang_resource_dir() -> String {
 pub fn load_compile_commands(
     path: Option<&Path>,
     workspace: &Path,
+    path_cache: &PathCache,
     suppress_libclang_warnings: bool,
 ) -> Result<(Vec<CompileCommand>, String)> {
     let Some(path) = path else {
@@ -93,12 +100,12 @@ pub fn load_compile_commands(
             || workspace.to_path_buf(),
             |p| absolutize_path(workspace, &p),
         );
-        let directory = fs::canonicalize(&directory).unwrap_or(directory);
+        let directory = path_cache.canonicalize_or_original(&directory);
         let Some(file_value) = item.file else {
             continue;
         };
         let source = absolutize_path(&directory, Path::new(&file_value));
-        let source = match fs::canonicalize(&source) {
+        let source = match path_cache.canonicalize(&source) {
             Ok(value) => value,
             Err(_) => continue,
         };
@@ -117,6 +124,7 @@ pub fn load_compile_commands(
             &raw_args,
             &directory,
             &source,
+            path_cache,
             &resource_dir,
             suppress_libclang_warnings,
         );
@@ -176,18 +184,21 @@ fn looks_like_target_compiler(base: &str) -> bool {
         .any(|suffix| base == *suffix || base.ends_with(&format!("-{suffix}")))
 }
 
-fn source_arg_matches(arg: &str, directory: &Path, source: &Path) -> bool {
+fn source_arg_matches(arg: &str, directory: &Path, source: &Path, path_cache: &PathCache) -> bool {
     let candidate = absolutize_path(directory, Path::new(arg));
-    fs::canonicalize(candidate).is_ok_and(|p| p == source)
+    path_cache
+        .canonicalize(&candidate)
+        .is_ok_and(|p| p == source)
 }
 
-fn absolutize_arg_path(value: &str, directory: &Path) -> String {
+fn absolutize_arg_path(value: &str, directory: &Path, path_cache: &PathCache) -> String {
     if value.is_empty() || value.starts_with('$') {
         value.to_owned()
     } else {
-        absolutize_path(directory, Path::new(value))
-            .canonicalize()
-            .unwrap_or_else(|_| absolutize_path(directory, Path::new(value)))
+        let path = absolutize_path(directory, Path::new(value));
+        path_cache
+            .canonicalize(&path)
+            .unwrap_or(path)
             .display()
             .to_string()
     }
@@ -197,6 +208,7 @@ fn clean_compile_args(
     raw_args: &[String],
     directory: &Path,
     source: &Path,
+    path_cache: &PathCache,
     resource_dir: &str,
     suppress_libclang_warnings: bool,
 ) -> Vec<String> {
@@ -220,7 +232,7 @@ fn clean_compile_args(
             continue;
         }
         if pending_path_opt {
-            cleaned.push(absolutize_arg_path(arg, directory));
+            cleaned.push(absolutize_arg_path(arg, directory, path_cache));
             pending_path_opt = false;
             continue;
         }
@@ -231,7 +243,7 @@ fn clean_compile_args(
                     .file_name()
                     .and_then(|v| v.to_str())
                     .unwrap_or_default()
-            || source_arg_matches(arg, directory, source)
+            || source_arg_matches(arg, directory, source, path_cache)
         {
             continue;
         }
@@ -259,7 +271,7 @@ fn clean_compile_args(
             if arg.starts_with(opt) && arg.len() > opt.len() {
                 cleaned.push(format!(
                     "{opt}{}",
-                    absolutize_arg_path(&arg[opt.len()..], directory)
+                    absolutize_arg_path(&arg[opt.len()..], directory, path_cache)
                 ));
                 handled_joined = true;
                 break;
@@ -271,7 +283,7 @@ fn clean_compile_args(
         if let Some(value) = arg.strip_prefix("--sysroot=") {
             cleaned.push(format!(
                 "--sysroot={}",
-                absolutize_arg_path(value, directory)
+                absolutize_arg_path(value, directory, path_cache)
             ));
             continue;
         }

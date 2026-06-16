@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_EXCLUDE_PARTS: &[&str] = &[
     ".git",
@@ -28,12 +29,49 @@ pub fn absolutize_path(workspace: &Path, path: &Path) -> PathBuf {
     }
 }
 
-pub fn rel(workspace: &Path, path: &Path) -> Result<String> {
-    Ok(fs::canonicalize(path)?
-        .strip_prefix(workspace)
-        .map_err(|_| anyhow!("path is outside workspace: {}", path.display()))?
-        .to_string_lossy()
-        .replace('\\', "/"))
+#[derive(Clone, Debug, Default)]
+pub struct PathCache {
+    canonicalized: Arc<Mutex<HashMap<PathBuf, PathBuf>>>,
+}
+
+impl PathCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        let key = path.to_path_buf();
+        if let Some(value) = self
+            .canonicalized
+            .lock()
+            .expect("path cache mutex poisoned")
+            .get(&key)
+            .cloned()
+        {
+            return Ok(value);
+        }
+        let value = fs::canonicalize(path)?;
+        self.canonicalized
+            .lock()
+            .expect("path cache mutex poisoned")
+            .insert(key, value.clone());
+        Ok(value)
+    }
+
+    pub fn canonicalize_or_original(&self, path: &Path) -> PathBuf {
+        self.canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    pub fn rel(&self, workspace: &Path, path: &Path) -> Result<String> {
+        let workspace = self.canonicalize(workspace)?;
+        Ok(self
+            .canonicalize(path)?
+            .strip_prefix(&workspace)
+            .map_err(|_| anyhow!("path is outside workspace: {}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/"))
+    }
 }
 
 pub fn ext(path: &Path) -> String {

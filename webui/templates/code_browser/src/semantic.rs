@@ -13,7 +13,7 @@ use std::thread;
 
 use crate::compile_db::CompileCommand;
 use crate::db::count_table;
-use crate::path_util::{ext, is_c_family, rel};
+use crate::path_util::{PathCache, ext, is_c_family};
 
 #[derive(Default, Debug)]
 struct TuRows {
@@ -45,9 +45,9 @@ struct RefRow {
 
 struct VisitState<'a> {
     workspace: &'a Path,
+    path_cache: PathCache,
     rows: &'a mut TuRows,
     source_cache: HashMap<PathBuf, Vec<String>>,
-    path_cache: HashMap<PathBuf, PathInfo>,
     main_source: PathBuf,
     header_claims: Arc<Mutex<HashSet<PathBuf>>>,
     claimed_headers: HashSet<PathBuf>,
@@ -65,6 +65,7 @@ pub fn index_translation_units(
     conn: &Connection,
     workspace: &Path,
     commands: &[CompileCommand],
+    path_cache: &PathCache,
     jobs: usize,
     batch_size: usize,
     detailed_processing_record: bool,
@@ -83,6 +84,7 @@ pub fn index_translation_units(
         let next_index = Arc::clone(&next_index);
         let result_tx = result_tx.clone();
         let workspace = workspace.to_path_buf();
+        let path_cache = path_cache.clone();
         let header_claims = Arc::clone(&header_claims);
         handles.push(thread::spawn(move || {
             loop {
@@ -94,6 +96,7 @@ pub fn index_translation_units(
                 let rows = extract_translation_unit_rows(
                     &workspace,
                     command,
+                    &path_cache,
                     detailed_processing_record,
                     Arc::clone(&header_claims),
                 );
@@ -126,6 +129,7 @@ pub fn index_translation_units(
 fn extract_translation_unit_rows(
     workspace: &Path,
     command: &CompileCommand,
+    path_cache: &PathCache,
     detailed_processing_record: bool,
     header_claims: Arc<Mutex<HashSet<PathBuf>>>,
 ) -> TuRows {
@@ -136,6 +140,7 @@ fn extract_translation_unit_rows(
             emit_parse_error(
                 workspace,
                 &command.source,
+                path_cache,
                 &format!("invalid source path: {exc}"),
             );
             return rows;
@@ -152,6 +157,7 @@ fn extract_translation_unit_rows(
             emit_parse_error(
                 workspace,
                 &command.source,
+                path_cache,
                 &format!("invalid compiler argument: {exc}"),
             );
             return rows;
@@ -166,7 +172,12 @@ fn extract_translation_unit_rows(
     unsafe {
         let index = clang_createIndex(0, 0);
         if index.is_null() {
-            emit_parse_error(workspace, &command.source, "libclang create index failed");
+            emit_parse_error(
+                workspace,
+                &command.source,
+                path_cache,
+                "libclang create index failed",
+            );
             return rows;
         }
         let mut tu: CXTranslationUnit = ptr::null_mut();
@@ -184,18 +195,19 @@ fn extract_translation_unit_rows(
             emit_parse_error(
                 workspace,
                 &command.source,
+                path_cache,
                 &format!("libclang parse failed: CXErrorCode={error}"),
             );
             clang_disposeIndex(index);
             return rows;
         }
-        emit_diagnostics(workspace, tu);
+        emit_diagnostics(workspace, path_cache, tu);
         let cursor = clang_getTranslationUnitCursor(tu);
         let mut state = VisitState {
             workspace,
+            path_cache: path_cache.clone(),
             rows: &mut rows,
             source_cache: HashMap::new(),
-            path_cache: HashMap::new(),
             main_source: command.source.clone(),
             header_claims,
             claimed_headers: HashSet::new(),
@@ -222,7 +234,7 @@ extern "C" fn visit_child(
     let Some((path, line)) = cursor_location(cursor) else {
         return CXChildVisit_Recurse;
     };
-    let info = cached_path_info(state, &path).clone();
+    let info = build_path_info(state.workspace, &path, &state.path_cache);
     let Some(rpath) = info.relative.clone() else {
         return CXChildVisit_Continue;
     };
@@ -288,15 +300,8 @@ extern "C" fn visit_child(
     CXChildVisit_Recurse
 }
 
-fn cached_path_info<'a>(state: &'a mut VisitState<'_>, path: &Path) -> &'a PathInfo {
-    state
-        .path_cache
-        .entry(path.to_path_buf())
-        .or_insert_with(|| build_path_info(state.workspace, path))
-}
-
-fn build_path_info(workspace: &Path, path: &Path) -> PathInfo {
-    let Ok(canonical) = fs::canonicalize(path) else {
+fn build_path_info(workspace: &Path, path: &Path, path_cache: &PathCache) -> PathInfo {
+    let Ok(canonical) = path_cache.canonicalize(path) else {
         return PathInfo {
             canonical: path.to_path_buf(),
             relative: None,
@@ -304,10 +309,7 @@ fn build_path_info(workspace: &Path, path: &Path) -> PathInfo {
             is_header: false,
         };
     };
-    let relative = canonical
-        .strip_prefix(workspace)
-        .ok()
-        .map(|value| value.to_string_lossy().replace('\\', "/"));
+    let relative = path_cache.rel(workspace, &canonical).ok();
     let is_c_family = is_c_family(&canonical);
     let is_header = matches!(ext(&canonical).as_str(), "h" | "hh" | "hpp" | "hxx");
     PathInfo {
@@ -348,18 +350,20 @@ fn path_to_cstring(path: &Path) -> std::result::Result<CString, std::ffi::NulErr
     CString::new(path.to_string_lossy().as_bytes())
 }
 
-fn emit_parse_error(workspace: &Path, source: &Path, message: &str) {
-    let path = rel(workspace, source).unwrap_or_else(|_| source.display().to_string());
+fn emit_parse_error(workspace: &Path, source: &Path, path_cache: &PathCache, message: &str) {
+    let path = path_cache
+        .rel(workspace, source)
+        .unwrap_or_else(|_| source.display().to_string());
     eprintln!("libclang diagnostic: {path}:0:0: fatal: {message}");
 }
 
-fn emit_diagnostics(workspace: &Path, tu: CXTranslationUnit) {
+fn emit_diagnostics(workspace: &Path, path_cache: &PathCache, tu: CXTranslationUnit) {
     unsafe {
         let count = clang_getNumDiagnostics(tu);
         for i in 0..count {
             let diagnostic = clang_getDiagnostic(tu, i);
             let loc = clang_getDiagnosticLocation(diagnostic);
-            let (path, line, column) = source_location(workspace, loc);
+            let (path, line, column) = source_location(workspace, path_cache, loc);
             let severity = clang_getDiagnosticSeverity(diagnostic) as u32;
             let spelling = cx_string(clang_getDiagnosticSpelling(diagnostic));
             eprintln!(
@@ -392,7 +396,11 @@ fn cursor_location(cursor: CXCursor) -> Option<(PathBuf, u32)> {
     }
 }
 
-fn source_location(workspace: &Path, loc: CXSourceLocation) -> (Option<String>, u32, u32) {
+fn source_location(
+    workspace: &Path,
+    path_cache: &PathCache,
+    loc: CXSourceLocation,
+) -> (Option<String>, u32, u32) {
     unsafe {
         let mut file: CXFile = ptr::null_mut();
         let mut line = 0;
@@ -407,7 +415,9 @@ fn source_location(workspace: &Path, loc: CXSourceLocation) -> (Option<String>, 
             (None, line, column)
         } else {
             let path = PathBuf::from(name);
-            let display = rel(workspace, &path).unwrap_or_else(|_| path.display().to_string());
+            let display = path_cache
+                .rel(workspace, &path)
+                .unwrap_or_else(|_| path.display().to_string());
             (Some(display), line, column)
         }
     }

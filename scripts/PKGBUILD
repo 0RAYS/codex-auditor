@@ -19,7 +19,7 @@ depends=(
 makedepends=(cargo)
 
 source=(xref.tar.zst)
-sha256sums=('ededb28b9cf70bce7b971dd63143fed05a0f88b99cc4604194d57438be08a093')
+sha256sums=('9f2a9c1d8ecb006b9119ec87e6ee775410ff50581d1400af0ee7ae64d634a8a1')
 
 prepare() {
   cd "$pkgname"

@@ -1,0 +1,19 @@
+{
+  "summary": "描述核心 bug",
+  "bug_type": "memory_corruption | oob_read | oob_write | heap_overflow | stack_overflow | integer_overflow | uaf | double_free | type_confusion | info_leak | command_injection | path_traversal | auth_bypass | format_confusion | logic_bug | crash | data_race | other",
+  "target_component": "源码目录或子系统",
+  "source_locations": [
+    {
+      "file": "相对路径",
+      "line": 0,
+      "function": "相关函数或符号"
+    }
+  ],
+  "confidence": 0.0,
+  "tested_binaries": [],
+  "repro_command": "/data/workspace/audit/TARGET-001/repro.sh",
+  "observed_result": "实际发生了什么",
+  "expected_result": "预期应该发生什么",
+  "security_relevance": "high | medium | low | unknown",
+  "known_duplicate_check": "已检查 known findings、测试、commit、公告和现有报告"
+}

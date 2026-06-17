@@ -21,13 +21,26 @@ description: 验证、定级、复现并打包二进制漏洞候选。用于已�
 
 1. 在 `./archives/` 下创建候选目录：`./archives/{id}-{description}/`。
 
-2. 按照 `./report_template` 的格式，在 `./archives/{id}-{description}/` 中编写中文漏洞报告和 PoC。
+2. 从本 skill 的 `assets/report_template/` 复制候选产物模板到 `./archives/{id}-{description}/`，并按实际目标填写：
+   - `report.md`：中文漏洞报告。
+   - `candidate.json`：结构化候选摘要。
+   - `repro.sh`：稳定复现 oracle wrapper。
+   - `notes.md`：失败假设、最小化、调试 trace、重复检查和未来放大思路记录。
 
 3. 用中文将本次发现追加到 `./archives/known_findings.md`。
 
 4. 不要止步于不可利用的低危漏洞。优先推进可能导致 RCE 的高价值漏洞。
 
 5. 如果没有确认有价值漏洞，返回 `$bug-hunting` 继续挖掘新候选。
+
+## 候选产物模板
+
+模板源文件在 `assets/report_template/`。归档时保留这些文件名，替换模板占位内容，不要删除用于复核的字段。
+
+- `report.md` 必须包含：标题、结论、环境、复现方法、实际现象、预期行为、根因分析、影响判断。报告用中文说明置信度、安全相关性、目标 commit 或版本、构建类型、二进制、sanitizer/debug 事实、关键 flag、复现命令、复现判定、重复次数、源码路径、函数、分支、输入或状态来源、边界条件、状态改变、危险使用点、缺失检查、影响版本和影响类型。
+- `candidate.json` 必须填写核心 bug 摘要、`bug_type`、目标组件、源码位置、置信度、测试过的二进制、复现命令、实际结果、预期结果、安全相关性和重复检查结论。`bug_type` 使用模板中的候选枚举，无法归类时才使用 `other`。
+- `repro.sh` 必须把目标专用复现判定映射为唯一 oracle：`exit 1` 表示复现 bug，`exit 0` 表示未复现 bug，其他退出码表示 harness 无效或不稳定。不要直接透传目标二进制退出码；crash、sanitizer、timeout、错误输出或语义差异都应在 wrapper 内解析后再返回 1/0。
+- `notes.md` 用于记录报告外的工作日志：失败假设、最小化尝试、构建 flag、调试器 trace、备选根因解释、重复检查和未来放大思路。
 
 ## `known_findings.md` 填写参考
 

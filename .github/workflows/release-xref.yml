@@ -63,6 +63,7 @@ jobs:
         id: build
         if: steps.release.outputs.exists == 'false'
         run: |
+          cd "$GITHUB_REPOSITORY"
           git ls-files xref/ | bsdtar --zstd -cf scripts/xref.tar.zst -T -
 
           useradd -m builder

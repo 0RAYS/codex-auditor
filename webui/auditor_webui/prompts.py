@@ -42,8 +42,8 @@ def base_prompt(
         如果以下任务未完成, 则你是项目初始化负责人, 以下是你的checklist。
 
         1. 拉取目标程序完整源码并编译，要求 asan、release 和 debug 三个版本，配置好尽可能可用的调试环境。
-        2. 使用全局 `xref` 命令为目标工作区建立 `xref.db` 索引，配置好 verify，确保 pytest 通过且工具可用。
-        3. 运行长任务时, 使用 thread automation, 运行结束后读取最后一段输出来判断是否成功。
+        2. 使用 `xref` 命令为目标工作区建立 `xref.db` 索引，配置好 verify，确保 pytest 通过且工具可用。
+        3. `xref` 构建数据库时要有完整的commit历史和所有的TU数据，但编译和构建是长任务，将其放在后台定期检查.
         """,
     ).strip()
 

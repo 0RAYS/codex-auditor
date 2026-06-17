@@ -66,8 +66,6 @@ struct IndexArgs {
     batch_size: usize,
     #[arg(short = 'r', long, action = ArgAction::SetTrue, default_value_t = false)]
     detailed_processing_record: bool,
-    #[arg(short = 'W', long, action = ArgAction::SetTrue, default_value_t = false)]
-    libclang_warnings: bool,
 }
 
 #[derive(Args, Debug)]
@@ -177,12 +175,8 @@ fn index_workspace(workspace: &Path, db: &Path, args: IndexArgs) -> Result<()> {
 
     let compile_commands_path =
         find_compile_commands(&workspace, args.compile_commands.as_deref(), &path_cache);
-    let (mut compile_commands, compile_commands_meta) = load_compile_commands(
-        compile_commands_path.as_deref(),
-        &workspace,
-        &path_cache,
-        !args.libclang_warnings,
-    )?;
+    let (mut compile_commands, compile_commands_meta) =
+        load_compile_commands(compile_commands_path.as_deref(), &workspace, &path_cache)?;
     if let Some(limit) = args.tu_limit {
         compile_commands.truncate(limit);
     }
@@ -230,10 +224,6 @@ fn index_workspace(workspace: &Path, db: &Path, args: IndexArgs) -> Result<()> {
             "no"
         }
         .to_owned(),
-    );
-    meta.insert(
-        "libclang_warnings".to_owned(),
-        if args.libclang_warnings { "yes" } else { "no" }.to_owned(),
     );
     meta.insert(
         "semantic_elapsed_seconds".to_owned(),

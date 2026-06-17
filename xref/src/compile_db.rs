@@ -81,7 +81,6 @@ pub fn load_compile_commands(
     path: Option<&Path>,
     workspace: &Path,
     path_cache: &PathCache,
-    suppress_libclang_warnings: bool,
 ) -> Result<(Vec<CompileCommand>, String)> {
     let Some(path) = path else {
         return Ok((Vec::new(), String::new()));
@@ -120,14 +119,7 @@ pub fn load_compile_commands(
         } else {
             vec!["clang".to_owned(), source.display().to_string()]
         };
-        let args = clean_compile_args(
-            &raw_args,
-            &directory,
-            &source,
-            path_cache,
-            &resource_dir,
-            suppress_libclang_warnings,
-        );
+        let args = clean_compile_args(&raw_args, &directory, &source, path_cache, &resource_dir);
         commands.push(CompileCommand { source, args });
     }
     Ok((commands, path.display().to_string()))
@@ -210,7 +202,6 @@ fn clean_compile_args(
     source: &Path,
     path_cache: &PathCache,
     resource_dir: &str,
-    suppress_libclang_warnings: bool,
 ) -> Vec<String> {
     let args = compiler_payload(raw_args);
     let path_taking_opts = [
@@ -224,16 +215,30 @@ fn clean_compile_args(
         "--sysroot",
     ];
     let mut cleaned = Vec::new();
-    let mut skip_next = false;
     let mut pending_path_opt = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
         if pending_path_opt {
             cleaned.push(absolutize_arg_path(arg, directory, path_cache));
             pending_path_opt = false;
+            i += 1;
+            continue;
+        }
+        if arg == "-Xclang"
+            && args
+                .get(i + 1)
+                .is_some_and(|next| is_warning_or_diagnostic_flag(next))
+        {
+            i += 2;
+            continue;
+        }
+        if arg
+            .strip_prefix("-Xclang=")
+            .is_some_and(is_warning_or_diagnostic_flag)
+            || is_warning_or_diagnostic_flag(arg)
+        {
+            i += 1;
             continue;
         }
         if arg == "-c"
@@ -245,18 +250,21 @@ fn clean_compile_args(
                     .unwrap_or_default()
             || source_arg_matches(arg, directory, source, path_cache)
         {
+            i += 1;
             continue;
         }
         if arg == "-o" {
-            skip_next = true;
+            i += 2;
             continue;
         }
         if arg.starts_with("-o") && arg.len() > 2 {
+            i += 1;
             continue;
         }
         if path_taking_opts.contains(&arg.as_str()) {
             cleaned.push(arg.clone());
             pending_path_opt = true;
+            i += 1;
             continue;
         }
         let mut handled_joined = false;
@@ -278,6 +286,7 @@ fn clean_compile_args(
             }
         }
         if handled_joined {
+            i += 1;
             continue;
         }
         if let Some(value) = arg.strip_prefix("--sysroot=") {
@@ -285,9 +294,11 @@ fn clean_compile_args(
                 "--sysroot={}",
                 absolutize_arg_path(value, directory, path_cache)
             ));
+            i += 1;
             continue;
         }
         cleaned.push(arg.clone());
+        i += 1;
     }
     if !resource_dir.is_empty()
         && !cleaned
@@ -297,8 +308,215 @@ fn clean_compile_args(
         cleaned.push("-resource-dir".to_owned());
         cleaned.push(resource_dir.to_owned());
     }
-    if suppress_libclang_warnings && !cleaned.iter().any(|arg| arg == "-w") {
-        cleaned.push("-w".to_owned());
-    }
+    cleaned.push("-w".to_owned());
     cleaned
+}
+
+fn is_warning_or_diagnostic_flag(arg: &str) -> bool {
+    if arg.starts_with("-W") {
+        return !matches!(arg.as_bytes(), [b'-', b'W', _, b',', ..]);
+    }
+    matches!(arg, "-w" | "-pedantic" | "-pedantic-errors")
+        || arg.starts_with("-fdiagnostics-")
+        || arg.starts_with("-ferror-limit=")
+        || arg.starts_with("-ftemplate-backtrace-limit=")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestProject {
+        root: PathBuf,
+        source: PathBuf,
+    }
+
+    impl Drop for TestProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn test_project(name: &str) -> TestProject {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "xref_compile_db_{name}_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let source = src_dir.join("main.c");
+        std::fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+        TestProject {
+            root: std::fs::canonicalize(root).unwrap(),
+            source: std::fs::canonicalize(source).unwrap(),
+        }
+    }
+
+    fn clean_for(project: &TestProject, raw_args: Vec<String>, resource_dir: &str) -> Vec<String> {
+        let path_cache = PathCache::new();
+        clean_compile_args(
+            &raw_args,
+            &project.root,
+            &project.source,
+            &path_cache,
+            resource_dir,
+        )
+    }
+
+    fn arg_vec(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    fn assert_followed_by(args: &[String], option: &str, value: &str) {
+        let index = args
+            .iter()
+            .position(|arg| arg == option)
+            .unwrap_or_else(|| panic!("missing option {option} in {args:?}"));
+        assert_eq!(args.get(index + 1).map(String::as_str), Some(value));
+    }
+
+    #[test]
+    fn warning_flags_are_removed_and_single_w_is_appended() {
+        let project = test_project("warning_flags");
+        let mut raw_args = arg_vec(&[
+            "clang",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Werror=unused-variable",
+            "-Wno-error",
+            "-Wno-error=deprecated-declarations",
+            "-Wno-unused-parameter",
+            "-Wunused-variable",
+            "-pedantic",
+            "-pedantic-errors",
+            "-fdiagnostics-color=always",
+            "-fdiagnostics-show-option",
+            "-ferror-limit=0",
+            "-ftemplate-backtrace-limit=0",
+            "-DVALUE=1",
+            "-std=c11",
+            "-c",
+        ]);
+        raw_args.push(project.source.display().to_string());
+
+        let cleaned = clean_for(&project, raw_args, "/fallback/resource");
+
+        assert_eq!(cleaned.last().map(String::as_str), Some("-w"));
+        assert_eq!(cleaned.iter().filter(|arg| arg.as_str() == "-w").count(), 1);
+        for removed in [
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Werror=unused-variable",
+            "-Wno-error",
+            "-Wno-error=deprecated-declarations",
+            "-Wno-unused-parameter",
+            "-Wunused-variable",
+            "-pedantic",
+            "-pedantic-errors",
+            "-fdiagnostics-color=always",
+            "-fdiagnostics-show-option",
+            "-ferror-limit=0",
+            "-ftemplate-backtrace-limit=0",
+        ] {
+            assert!(!cleaned.iter().any(|arg| arg == removed), "{cleaned:?}");
+        }
+        assert!(cleaned.iter().any(|arg| arg == "-DVALUE=1"));
+        assert!(cleaned.iter().any(|arg| arg == "-std=c11"));
+    }
+
+    #[test]
+    fn existing_w_is_normalized_to_one_final_w() {
+        let project = test_project("normalize_w");
+        let mut raw_args = arg_vec(&["clang", "-w", "-Wno-everything", "-DDEBUG", "-c"]);
+        raw_args.push(project.source.display().to_string());
+
+        let cleaned = clean_for(&project, raw_args, "");
+
+        assert_eq!(cleaned.last().map(String::as_str), Some("-w"));
+        assert_eq!(cleaned.iter().filter(|arg| arg.as_str() == "-w").count(), 1);
+        assert!(cleaned.iter().any(|arg| arg == "-DDEBUG"));
+        assert!(!cleaned.iter().any(|arg| arg == "-Wno-everything"));
+    }
+
+    #[test]
+    fn warning_like_passthrough_options_are_preserved() {
+        let project = test_project("passthrough_w");
+        let mut raw_args = arg_vec(&[
+            "clang",
+            "-Wl,--as-needed",
+            "-Wa,-adhln",
+            "-Wp,-MD,dep.d",
+            "-Wno-unused-variable",
+            "-c",
+        ]);
+        raw_args.push(project.source.display().to_string());
+
+        let cleaned = clean_for(&project, raw_args, "");
+
+        assert!(cleaned.iter().any(|arg| arg == "-Wl,--as-needed"));
+        assert!(cleaned.iter().any(|arg| arg == "-Wa,-adhln"));
+        assert!(cleaned.iter().any(|arg| arg == "-Wp,-MD,dep.d"));
+        assert!(!cleaned.iter().any(|arg| arg == "-Wno-unused-variable"));
+        assert_eq!(cleaned.last().map(String::as_str), Some("-w"));
+    }
+
+    #[test]
+    fn include_sysroot_and_resource_dir_behavior_is_preserved() {
+        let project = test_project("paths");
+        for dir in ["include", "sysinclude", "sysroot", "sdk"] {
+            std::fs::create_dir_all(project.root.join(dir)).unwrap();
+        }
+        let raw_args = arg_vec(&[
+            "clang",
+            "-Iinclude",
+            "-isystem",
+            "sysinclude",
+            "--sysroot=sysroot",
+            "-isysroot",
+            "sdk",
+            "-resource-dir",
+            "/custom/resource",
+            "-c",
+            "src/main.c",
+        ]);
+
+        let cleaned = clean_for(&project, raw_args, "/fallback/resource");
+
+        assert!(
+            cleaned
+                .iter()
+                .any(|arg| { arg == &format!("-I{}", project.root.join("include").display()) })
+        );
+        assert_followed_by(
+            &cleaned,
+            "-isystem",
+            &project.root.join("sysinclude").display().to_string(),
+        );
+        assert!(cleaned.iter().any(|arg| {
+            arg == &format!("--sysroot={}", project.root.join("sysroot").display())
+        }));
+        assert_followed_by(
+            &cleaned,
+            "-isysroot",
+            &project.root.join("sdk").display().to_string(),
+        );
+        assert_followed_by(&cleaned, "-resource-dir", "/custom/resource");
+        assert_eq!(
+            cleaned
+                .iter()
+                .filter(|arg| arg.as_str() == "-resource-dir")
+                .count(),
+            1
+        );
+        assert!(!cleaned.iter().any(|arg| arg == "/fallback/resource"));
+        assert_eq!(cleaned.last().map(String::as_str), Some("-w"));
+    }
 }

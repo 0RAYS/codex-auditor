@@ -41,7 +41,8 @@ xref -w /目标/路径 \
 C/C++ 语义索引由 compile database 中的翻译单元决定。
 默认只索引 C/C++ 相关后缀：`.c/.cc/.cpp/.cxx/.h/.hh/.hpp/.hxx`；test/fuzz 目录不会被特殊过滤。
 `PARSE_DETAILED_PROCESSING_RECORD` 默认关闭，需要时可加 `-r/--detailed-processing-record`。
-libclang 解析失败或诊断会在构建时输出到 stderr，不写入 SQLite。
+索引会丢弃 `compile_commands.json` 中的 warning/diagnostic 控制 flags，并在传给 libclang 的
+参数末尾统一加入 `-w`。libclang 解析失败或 fatal diagnostics 会在构建时输出到 stderr，不写入 SQLite。
 
 ## 查询示例
 

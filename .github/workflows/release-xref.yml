@@ -28,6 +28,9 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Read package metadata
         id: pkg
         run: |

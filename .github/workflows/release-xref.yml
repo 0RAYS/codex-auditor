@@ -63,8 +63,7 @@ jobs:
         id: build
         if: steps.release.outputs.exists == 'false'
         run: |
-          cd "$GITHUB_REPOSITORY"
-          git ls-files xref/ | bsdtar --zstd -cf scripts/xref.tar.zst -T -
+          git archive --format=tar HEAD xref | zstd -q -c > scripts/xref.tar.zst
 
           useradd -m builder
           install -d -m 0750 /etc/sudoers.d

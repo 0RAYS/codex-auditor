@@ -1,0 +1,101 @@
+name: Release xref
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "scripts/PKGBUILD"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install workflow tools
+        run: pacman -Syu --noconfirm --needed git github-cli
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Read package metadata
+        id: pkg
+        run: |
+          source scripts/PKGBUILD
+          echo "version=$pkgver" >> "$GITHUB_OUTPUT"
+          echo "tag=xref-v$pkgver" >> "$GITHUB_OUTPUT"
+          echo "title=xref $pkgver" >> "$GITHUB_OUTPUT"
+
+      - name: Check existing release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: |
+          set +e
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/tmp/release.out 2>/tmp/release.err
+          status=$?
+          set -e
+
+          if ((status == 0)); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -qiE "not found|could not resolve" /tmp/release.err; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            cat /tmp/release.err >&2
+            exit "$status"
+          fi
+
+      - name: Build package
+        id: build
+        if: steps.release.outputs.exists == 'false'
+        run: |
+          git ls-files xref/ | bsdtar --zstd -cf scripts/xref.tar.zst -T -
+
+          useradd -m builder
+          install -d -m 0750 /etc/sudoers.d
+          echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+          sudo -u builder --preserve-env=GITHUB_WORKSPACE bash -lc \
+            'cd "$GITHUB_WORKSPACE/scripts" && makepkg -Csf --noconfirm --syncdeps'
+
+          pkgfile=$(find scripts -maxdepth 1 -type f -name "xref-*.pkg.tar.zst" ! -name "xref-debug-*.pkg.tar.zst" -print -quit)
+          debugfile=$(find scripts -maxdepth 1 -type f -name "xref-debug-*.pkg.tar.zst" -print -quit)
+          test -n "$pkgfile"
+          test -n "$debugfile"
+          {
+            echo "pkgfiles<<EOF"
+            printf "%s\n" "$pkgfile" "$debugfile"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release body
+        if: steps.release.outputs.exists == 'false'
+        run: git show -s --format=%B HEAD^ > release-body.md
+
+      - name: Publish release
+        if: steps.release.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+          TITLE: ${{ steps.pkg.outputs.title }}
+          PKGFILES: ${{ steps.build.outputs.pkgfiles }}
+        run: |
+          mapfile -t pkgfiles <<< "$PKGFILES"
+          gh release create "$TAG" "${pkgfiles[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --notes-file release-body.md \
+            --target "$GITHUB_SHA"

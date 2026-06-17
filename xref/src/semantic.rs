@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clang_sys::*;
-use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -10,37 +9,17 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::compile_db::CompileCommand;
-use crate::db::count_table;
+use crate::db::{RefInsertRow, SymbolInsertRow, XrefDb};
 use crate::path_util::{PathCache, ext, is_c_family};
+use crate::progress::format_progress;
 
 #[derive(Default, Debug)]
 struct TuRows {
-    symbols: Vec<SymbolRow>,
-    refs: Vec<RefRow>,
-}
-
-#[derive(Debug)]
-struct SymbolRow {
-    usr: String,
-    name: String,
-    kind: String,
-    path: String,
-    line: u32,
-    is_definition: bool,
-    type_text: String,
-    signature: String,
-}
-
-#[derive(Debug)]
-struct RefRow {
-    referenced_usr: String,
-    name: String,
-    kind: String,
-    path: String,
-    line: u32,
-    context: String,
+    symbols: Vec<SymbolInsertRow>,
+    refs: Vec<RefInsertRow>,
 }
 
 struct VisitState<'a> {
@@ -62,7 +41,7 @@ struct PathInfo {
 }
 
 pub fn index_translation_units(
-    conn: &Connection,
+    db: &XrefDb,
     workspace: &Path,
     commands: &[CompileCommand],
     path_cache: &PathCache,
@@ -70,12 +49,14 @@ pub fn index_translation_units(
     batch_size: usize,
     detailed_processing_record: bool,
 ) -> Result<(usize, usize)> {
+    let progress_started = Instant::now();
     if commands.is_empty() {
+        eprintln!("{}", format_progress("semantic", 0, 0, Duration::ZERO));
         return Ok((0, 0));
     }
     let header_claims = Arc::new(Mutex::new(HashSet::new()));
     let worker_count = jobs.min(commands.len()).max(1);
-    let (result_tx, result_rx) = mpsc::channel::<(PathBuf, TuRows)>();
+    let (result_tx, result_rx) = mpsc::channel::<TuRows>();
     let commands = Arc::new(commands.to_vec());
     let next_index = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
@@ -100,7 +81,7 @@ pub fn index_translation_units(
                     detailed_processing_record,
                     Arc::clone(&header_claims),
                 );
-                let _ = result_tx.send((command.source.clone(), rows));
+                let _ = result_tx.send(rows);
             }
         }));
     }
@@ -108,13 +89,18 @@ pub fn index_translation_units(
 
     let mut symbol_rows = Vec::new();
     let mut ref_rows = Vec::new();
-    for (source, rows) in result_rx {
+    let mut done = 0;
+    let total = commands.len();
+    for rows in result_rx {
         symbol_rows.extend(rows.symbols);
         ref_rows.extend(rows.refs);
-        flush_semantic_rows(conn, &mut symbol_rows, &mut ref_rows, false, batch_size)?;
-        if handles.iter().any(thread::JoinHandle::is_finished) {
-            // Finished handles are joined below; this branch keeps clippy from suggesting no-op progress logic.
-            let _ = &source;
+        db.insert_semantic_rows(&mut symbol_rows, &mut ref_rows, false, batch_size)?;
+        done += 1;
+        if done < total {
+            eprintln!(
+                "{}",
+                format_progress("semantic", done, total, progress_started.elapsed())
+            );
         }
     }
     for handle in handles {
@@ -122,8 +108,12 @@ pub fn index_translation_units(
             eprintln!("libclang diagnostic: <unknown>:0:0: fatal: index worker panicked");
         }
     }
-    flush_semantic_rows(conn, &mut symbol_rows, &mut ref_rows, true, batch_size)?;
-    Ok((count_table(conn, "symbols")?, count_table(conn, "refs")?))
+    db.insert_semantic_rows(&mut symbol_rows, &mut ref_rows, true, batch_size)?;
+    eprintln!(
+        "{}",
+        format_progress("semantic", total, total, progress_started.elapsed())
+    );
+    db.count_symbols_refs()
 }
 
 fn extract_translation_unit_rows(
@@ -256,14 +246,13 @@ extern "C" fn visit_child(
         if name.is_empty() {
             return CXChildVisit_Recurse;
         }
-        state.rows.symbols.push(SymbolRow {
+        state.rows.symbols.push(SymbolInsertRow {
             usr: cursor_usr(cursor),
             name: name.clone(),
             kind: kind_spelling(kind),
             path: rpath.clone(),
             line,
             is_definition: unsafe { clang_isCursorDefinition(cursor) != 0 },
-            type_text: cursor_type_spelling(cursor),
             signature: cursor_signature(cursor, &display_name, &spelling),
         });
     }
@@ -271,25 +260,10 @@ extern "C" fn visit_child(
         let referenced = unsafe { clang_getCursorReferenced(cursor) };
         if unsafe { clang_Cursor_isNull(referenced) } == 0 {
             let ref_usr = cursor_usr(referenced);
-            let ref_name = {
-                let referenced_spelling = cursor_spelling(referenced);
-                if !referenced_spelling.is_empty() {
-                    referenced_spelling
-                } else {
-                    let spelling = cursor_spelling(cursor);
-                    if !spelling.is_empty() {
-                        spelling
-                    } else {
-                        cursor_display_name(cursor)
-                    }
-                }
-            };
-            if !ref_usr.is_empty() && !ref_name.is_empty() {
+            if !ref_usr.is_empty() {
                 let context = line_context(&info.canonical, line, &mut state.source_cache);
-                state.rows.refs.push(RefRow {
+                state.rows.refs.push(RefInsertRow {
                     referenced_usr: ref_usr,
-                    name: ref_name,
-                    kind: kind_spelling(kind),
                     path: rpath,
                     line,
                     context,
@@ -433,10 +407,6 @@ fn cursor_display_name(cursor: CXCursor) -> String {
 
 fn cursor_usr(cursor: CXCursor) -> String {
     unsafe { cx_string(clang_getCursorUSR(cursor)) }
-}
-
-fn cursor_type_spelling(cursor: CXCursor) -> String {
-    unsafe { cx_string(clang_getTypeSpelling(clang_getCursorType(cursor))) }
 }
 
 fn cursor_signature(cursor: CXCursor, display_name: &str, spelling: &str) -> String {
@@ -602,59 +572,4 @@ fn severity_name(value: u32) -> &'static str {
         4 => "fatal",
         _ => "unknown",
     }
-}
-
-fn flush_semantic_rows(
-    conn: &Connection,
-    symbol_rows: &mut Vec<SymbolRow>,
-    ref_rows: &mut Vec<RefRow>,
-    force: bool,
-    batch_size: usize,
-) -> Result<()> {
-    while (!symbol_rows.is_empty() && (force || symbol_rows.len() >= batch_size))
-        || (!ref_rows.is_empty() && (force || ref_rows.len() >= batch_size))
-    {
-        let tx = conn.unchecked_transaction()?;
-        if !symbol_rows.is_empty() && (force || symbol_rows.len() >= batch_size) {
-            let chunk_size = if force { symbol_rows.len() } else { batch_size };
-            let mut stmt = tx.prepare(
-                r#"
-                INSERT OR IGNORE INTO symbols(
-                  usr, name, kind, path, line, is_definition, type, signature
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )?;
-            for row in symbol_rows.drain(..chunk_size) {
-                stmt.execute(params![
-                    row.usr,
-                    row.name,
-                    row.kind,
-                    row.path,
-                    row.line,
-                    i32::from(row.is_definition),
-                    row.type_text,
-                    row.signature,
-                ])?;
-            }
-        }
-        if !ref_rows.is_empty() && (force || ref_rows.len() >= batch_size) {
-            let chunk_size = if force { ref_rows.len() } else { batch_size };
-            let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO refs(referenced_usr, name, kind, path, line, context) VALUES (?, ?, ?, ?, ?, ?)",
-            )?;
-            for row in ref_rows.drain(..chunk_size) {
-                stmt.execute(params![
-                    row.referenced_usr,
-                    row.name,
-                    row.kind,
-                    row.path,
-                    row.line,
-                    row.context,
-                ])?;
-            }
-        }
-        tx.commit()?;
-    }
-    Ok(())
 }

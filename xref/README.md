@@ -1,7 +1,7 @@
 # xref
 
-这是一个本地 SQLite 索引和 CLI，用于收集 C/C++ 审计事实。主后端使用 `libclang` 解析
-`compile_commands.json`，索引符号、定义和引用；同时保留近期 commit 辅助信息。
+这是一个本地 SQLite 索引和 CLI，用于收集 C/C++ 审计事实。它使用 `libclang` 解析
+`compile_commands.json`，索引符号、定义和引用；同时保留 `HEAD` 可达的 commit 辅助信息。
 
 索引数据库默认位于目标 workspace 根目录的 `xref.db`。`-w/--workspace /目标/路径` 会把相对
 `-d/--db` 解析到该 workspace 下，而不是当前 shell 的 `cwd`。
@@ -34,13 +34,13 @@ xref -w /目标/路径 \
 ```sh
 xref -w /目标/路径 \
   -d xref.db \
-  index \
-  -m 500
+  index
 ```
 
 C/C++ 语义索引由 compile database 中的翻译单元决定。
 默认只索引 C/C++ 相关后缀：`.c/.cc/.cpp/.cxx/.h/.hh/.hpp/.hxx`；test/fuzz 目录不会被特殊过滤。
 `PARSE_DETAILED_PROCESSING_RECORD` 默认关闭，需要时可加 `-r/--detailed-processing-record`。
+默认会索引 Git `HEAD` 可达的全部 commits；只需要语义索引时可加 `--skip-commits`。
 索引会丢弃 `compile_commands.json` 中的 warning/diagnostic 控制 flags，并在传给 libclang 的
 参数末尾统一加入 `-w`。libclang 解析失败或 fatal diagnostics 会在构建时输出到 stderr，不写入 SQLite。
 

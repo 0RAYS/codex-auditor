@@ -2,19 +2,18 @@ mod compile_db;
 mod db;
 mod git_index;
 mod path_util;
+mod progress;
 mod query;
 mod semantic;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand};
-use rusqlite::{Connection, params};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::Instant;
 
 use compile_db::{find_compile_commands, load_compile_commands};
-use db::reset_db;
+use db::{IndexMeta, XrefDb};
 use git_index::{git_metadata, index_commits};
 use path_util::PathCache;
 use semantic::index_translation_units;
@@ -34,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    #[command(about = "构建 libclang 语义索引。")]
+    #[command(about = "构建 C/C++ 语义索引。")]
     Index(IndexArgs),
     #[command(about = "显示索引元数据和新鲜度。")]
     Meta,
@@ -46,7 +45,7 @@ enum Command {
     Definition(TermArgs),
     #[command(about = "查询符号引用。")]
     Refs(TermArgs),
-    #[command(about = "查询近期 commit 辅助信息。")]
+    #[command(about = "查询 commit 辅助信息。")]
     Commits(CommitArgs),
     #[command(about = "显示文件位置或符号附近上下文。")]
     Context(ContextArgs),
@@ -56,13 +55,13 @@ enum Command {
 struct IndexArgs {
     #[arg(short = 'c', long)]
     compile_commands: Option<PathBuf>,
-    #[arg(short = 'm', long, default_value_t = 500)]
-    max_commits: i32,
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+    skip_commits: bool,
     #[arg(short = 't', long, value_parser = positive_usize)]
     tu_limit: Option<usize>,
-    #[arg(short = 'j', long, default_value_t = default_jobs(), value_parser = positive_usize)]
+    #[arg(short = 'j', long, default_value_t = 1, value_parser = positive_usize)]
     jobs: usize,
-    #[arg(short = 'b', long, default_value_t = 5000, value_parser = positive_usize)]
+    #[arg(short = 'b', long, default_value_t = 500, value_parser = positive_usize)]
     batch_size: usize,
     #[arg(short = 'r', long, action = ArgAction::SetTrue, default_value_t = false)]
     detailed_processing_record: bool,
@@ -101,12 +100,6 @@ struct ContextArgs {
     limit: usize,
 }
 
-fn default_jobs() -> usize {
-    thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(8)
-}
-
 fn positive_usize(value: &str) -> std::result::Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -121,19 +114,21 @@ fn positive_usize(value: &str) -> std::result::Result<usize, String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let workspace = resolve_workspace(&cli.workspace)?;
-    let db = resolve_db(&workspace, &cli.db);
+    let db_path = resolve_db(&workspace, &cli.db);
     match cli.command {
-        Command::Index(args) => index_workspace(&workspace, &db, args),
-        Command::Meta => query::meta(&workspace, &db),
+        Command::Index(args) => index_workspace(&workspace, &db_path, args),
+        Command::Meta => query::meta(&workspace, &db_path),
         Command::Symbols(args) | Command::Symbol(args) => {
-            query::symbols(&workspace, &db, &args.name, args.limit)
+            query::symbols(&workspace, &db_path, &args.name, args.limit)
         }
-        Command::Definition(args) => query::definition(&workspace, &db, &args.term, args.limit),
-        Command::Refs(args) => query::refs(&workspace, &db, &args.term, args.limit),
-        Command::Commits(args) => query::commits(&workspace, &db, &args.term, args.limit),
+        Command::Definition(args) => {
+            query::definition(&workspace, &db_path, &args.term, args.limit)
+        }
+        Command::Refs(args) => query::refs(&workspace, &db_path, &args.term, args.limit),
+        Command::Commits(args) => query::commits(&workspace, &db_path, &args.term, args.limit),
         Command::Context(args) => query::context(
             &workspace,
-            &db,
+            &db_path,
             &args.term,
             args.pattern.as_deref(),
             args.window,
@@ -181,13 +176,12 @@ fn index_workspace(workspace: &Path, db: &Path, args: IndexArgs) -> Result<()> {
         compile_commands.truncate(limit);
     }
 
-    let mut conn =
-        Connection::open(db).with_context(|| format!("无法打开数据库: {}", db.display()))?;
-    reset_db(&mut conn)?;
+    let mut xref_db = XrefDb::create_for_index(db)?;
+    xref_db.reset_schema()?;
 
     let semantic_started = Instant::now();
     let (symbol_count, ref_count) = index_translation_units(
-        &conn,
+        &xref_db,
         &workspace,
         &compile_commands,
         &path_cache,
@@ -197,55 +191,42 @@ fn index_workspace(workspace: &Path, db: &Path, args: IndexArgs) -> Result<()> {
     )?;
     let semantic_elapsed = semantic_started.elapsed().as_secs_f64();
     let commit_started = Instant::now();
-    index_commits(&conn, &workspace, args.max_commits)?;
+    let commit_count = if args.skip_commits {
+        0
+    } else {
+        index_commits(&xref_db, &workspace, args.batch_size)?
+    };
     let commit_elapsed = commit_started.elapsed().as_secs_f64();
     let total_elapsed = total_started.elapsed().as_secs_f64();
 
-    let mut meta = git_metadata(&workspace);
-    meta.insert("backend".to_owned(), "libclang".to_owned());
-    meta.insert("compile_commands".to_owned(), compile_commands_meta);
-    meta.insert(
-        "compile_command_count".to_owned(),
-        compile_commands.len().to_string(),
-    );
-    meta.insert("symbol_count".to_owned(), symbol_count.to_string());
-    meta.insert("ref_count".to_owned(), ref_count.to_string());
-    meta.insert("jobs".to_owned(), args.jobs.to_string());
-    meta.insert(
-        "tu_limit".to_owned(),
-        args.tu_limit.map_or_else(String::new, |v| v.to_string()),
-    );
-    meta.insert("batch_size".to_owned(), args.batch_size.to_string());
-    meta.insert(
-        "detailed_processing_record".to_owned(),
-        if args.detailed_processing_record {
-            "yes"
-        } else {
-            "no"
-        }
-        .to_owned(),
-    );
-    meta.insert(
-        "semantic_elapsed_seconds".to_owned(),
-        format!("{semantic_elapsed:.3}"),
-    );
-    meta.insert(
-        "commit_elapsed_seconds".to_owned(),
-        format!("{commit_elapsed:.3}"),
-    );
-    meta.insert(
-        "total_elapsed_seconds".to_owned(),
-        format!("{total_elapsed:.3}"),
-    );
-    for (key, value) in meta {
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-            params![key, value],
-        )?;
-    }
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    let git_meta = git_metadata(&workspace);
+    let meta = IndexMeta {
+        workspace: git_meta.get("workspace").cloned().unwrap_or_default(),
+        git_head: git_meta.get("git_head").cloned().unwrap_or_default(),
+        git_dirty: git_meta
+            .get("git_dirty")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_owned()),
+        git_status_count: git_meta
+            .get("git_status_count")
+            .and_then(|value| value.parse::<usize>().ok()),
+        compile_commands: compile_commands_meta,
+        compile_command_count: compile_commands.len(),
+        symbol_count,
+        ref_count,
+        commit_count,
+        jobs: args.jobs,
+        tu_limit: args.tu_limit,
+        batch_size: args.batch_size,
+        detailed_processing_record: args.detailed_processing_record,
+        semantic_elapsed_seconds: semantic_elapsed,
+        commit_elapsed_seconds: commit_elapsed,
+        total_elapsed_seconds: total_elapsed,
+    };
+    xref_db.replace_index_meta(&meta)?;
+    xref_db.checkpoint()?;
     println!(
-        "已索引 backend=libclang symbols={symbol_count} refs={ref_count} db={}",
+        "已索引 symbols={symbol_count} refs={ref_count} db={}",
         db.display()
     );
     Ok(())

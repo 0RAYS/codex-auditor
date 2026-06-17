@@ -1,0 +1,46 @@
+# Maintainer: RocketDev <ma2014119@outlook.com>
+
+pkgname=xref
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A cross reference tool used in codex-auditor"
+arch=(x86_64)
+url="https://github.com/0RAYS/codex-auditor"
+license=(MIT)
+depends=(
+  glibc
+  libgcc
+  libgit2
+  clang
+  openssl
+  sqlite
+  libssh2
+)
+makedepends=(cargo)
+
+source=(xref.tar.zst)
+sha256sums=('ededb28b9cf70bce7b971dd63143fed05a0f88b99cc4604194d57438be08a093')
+
+prepare() {
+  cd "$pkgname"
+  cargo fetch --locked --target host-tuple
+}
+
+build() {
+  cd "$pkgname"
+  export CARGO_TARGET_DIR=target
+  export LIBGIT2_NO_VENDOR=1
+  export LIBSQLITE3_SYS_USE_PKG_CONFIG=1
+  export OPENSSL_NO_VENDOR=1
+  export LIBSSH2_SYS_USE_PKG_CONFIG=1
+  export LIBZ_SYS_STATIC=0
+  cargo build --frozen --release --all-features
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
+  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE
+}
+
+# vim: ts=2 sw=2 et:

@@ -23,7 +23,7 @@ RUN pacman -Syu --noconfirm \
     unzip p7zip xz bzip2 tar zip libarchive tmux lrzsz \
     binutils strace lsof clang llvm-libs cppcheck patchelf \
     python python-pip python-flask uv openai-codex procps-ng ipython \
-    afl++ bear boost-libs debuginfod pwndbg libc++ \
+    afl++ bear boost-libs debuginfod pwndbg libc++ sqlite libgit2 libssh2 \
     zsh zsh-syntax-highlighting zsh-autosuggestions \
     net-tools iproute2 openbsd-netcat sudo rsync gunicorn \
     && pacman -Scc --noconfirm
@@ -42,9 +42,12 @@ COPY scripts/yay.sh /usr/local/sbin/yay
 RUN chmod +x /usr/local/sbin/yay
 
 # 3) 额外二进制工具
-ADD https://github.com/SaladDay/cc-switch-cli/releases/download/v5.8.1/cc-switch-cli-linux-x64-musl.tar.gz /tmp/ccs.tar.gz
+ADD https://github.com/SaladDay/cc-switch-cli/releases/download/v5.8.7/cc-switch-cli-linux-x64-musl.tar.gz /tmp/ccs.tar.gz
 ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64 /usr/bin/tini
+ADD https://github.com/0RAYS/codex-auditor/releases/download/xref-v0.1.0/xref-0.1.0-1-x86_64.pkg.tar.zst /tmp/xref.pkg.tar.zst
+ADD https://github.com/0RAYS/codex-auditor/releases/download/xref-v0.1.0/xref-debug-0.1.0-1-x86_64.pkg.tar.zst /tmp/xref-debug.pkg.tar.zst
 RUN tar -xzf /tmp/ccs.tar.gz -C /usr/bin cc-switch && rm /tmp/ccs.tar.gz && chmod +x /usr/bin/tini /usr/bin/cc-switch
+RUN pacman -U /tmp/xref*.pkg.tar.zst --noconfirm
 
 # 4) 目录结构
 RUN mkdir -p /data/workspace /data/codex /data/tools /data/cc-switch && \

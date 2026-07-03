@@ -99,8 +99,7 @@ impl XrefDb {
         Ok(Self { conn })
     }
 
-    pub fn reset_schema(&mut self) -> Result<()> {
-        let schema_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema.sql");
+    pub fn reset_schema(&mut self, schema_path: &Path) -> Result<()> {
         let schema = fs::read_to_string(&schema_path)
             .with_context(|| format!("无法读取 schema: {}", schema_path.display()))?;
         for table in [
@@ -525,8 +524,12 @@ mod tests {
         ));
         let guard = TestDb { path: path.clone() };
         let mut db = XrefDb::create_for_index(&path).unwrap();
-        db.reset_schema().unwrap();
+        db.reset_schema(&test_schema_path()).unwrap();
         (guard, db)
+    }
+
+    fn test_schema_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("schema.sql")
     }
 
     fn sample_symbol(name: &str) -> SymbolInsertRow {

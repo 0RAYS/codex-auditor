@@ -39,6 +39,7 @@ build() {
 
 package() {
   cd "$pkgname"
+  install -Dm0644 -t "$pkgdir/usr/share/xref/schema.sql" schema.sql
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
   install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE
 }

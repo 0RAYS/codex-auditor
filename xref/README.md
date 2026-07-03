@@ -6,6 +6,13 @@
 索引数据库默认位于目标 workspace 根目录的 `xref.db`。`-w/--workspace /目标/路径` 会把相对
 `-d/--db` 解析到该 workspace 下，而不是当前 shell 的 `cwd`。
 
+运行时数据文件通过 prefix 查找，不再依赖编译时的源码绝对路径。构建索引时会读取 `schema.sql`；
+默认 prefix 在编译时由 `build.rs` 写入：优先使用 `XREF_DEFAULT_PREFIX`，其次使用 `PREFIX`，
+都未设置时为 `/usr/share/xref`。
+
+schema 支持放在 `<prefix>/schema.sql`、`<prefix>/xref/schema.sql` 或
+`<prefix>/share/xref/schema.sql`，因此系统安装可使用 `/usr/share/xref/schema.sql`。
+
 ## 生成 compile_commands.json
 
 CMake 项目：

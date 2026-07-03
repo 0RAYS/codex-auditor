@@ -19,6 +19,10 @@ use path_util::PathCache;
 use semantic::index_translation_units;
 
 const DEFAULT_DB: &str = "xref.db";
+const APP_DATA_DIR: &str = "xref";
+const SCHEMA_FILE: &str = "schema.sql";
+const XREF_PREFIX_ENV: &str = "XREF_PREFIX";
+const COMPILED_DEFAULT_PREFIX: &str = env!("XREF_DEFAULT_PREFIX");
 
 #[derive(Parser, Debug)]
 #[command(about = "面向 C/C++ 审计的源码索引和查询工具。")]
@@ -27,6 +31,13 @@ struct Cli {
     workspace: PathBuf,
     #[arg(short = 'd', long, default_value = DEFAULT_DB, global = true)]
     db: PathBuf,
+    #[arg(
+        long,
+        global = true,
+        value_name = "PREFIX",
+        help = "运行时数据文件 prefix，用于查找 schema.sql"
+    )]
+    prefix: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -115,8 +126,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let workspace = resolve_workspace(&cli.workspace)?;
     let db_path = resolve_db(&workspace, &cli.db);
+    let runtime_paths = RuntimePaths::new(cli.prefix.as_deref())?;
     match cli.command {
-        Command::Index(args) => index_workspace(&workspace, &db_path, args),
+        Command::Index(args) => index_workspace(&workspace, &db_path, &runtime_paths, args),
         Command::Meta => query::meta(&workspace, &db_path),
         Command::Symbols(args) | Command::Symbol(args) => {
             query::symbols(&workspace, &db_path, &args.name, args.limit)
@@ -135,6 +147,53 @@ fn main() -> Result<()> {
             args.limit,
         ),
     }
+}
+
+#[derive(Debug)]
+struct RuntimePaths {
+    prefix: PathBuf,
+}
+
+impl RuntimePaths {
+    fn new(cli_prefix: Option<&Path>) -> Result<Self> {
+        let prefix = match cli_prefix {
+            Some(prefix) => absolutize_prefix(prefix)?,
+            None => match std::env::var_os(XREF_PREFIX_ENV) {
+                Some(prefix) => absolutize_prefix(Path::new(&prefix))?,
+                None => PathBuf::from(COMPILED_DEFAULT_PREFIX),
+            },
+        };
+        Ok(Self { prefix })
+    }
+
+    fn schema_path(&self) -> Result<PathBuf> {
+        schema_candidates(&self.prefix)
+            .into_iter()
+            .find(|path| path.exists())
+            .with_context(|| {
+                format!(
+                    "无法找到 schema。请把 {SCHEMA_FILE} 放到 prefix 下，或使用 --prefix <路径> / {XREF_PREFIX_ENV}=<路径> 指定数据目录；当前 prefix={}，编译期默认 prefix={}",
+                    self.prefix.display(),
+                    COMPILED_DEFAULT_PREFIX
+                )
+            })
+    }
+}
+
+fn absolutize_prefix(prefix: &Path) -> Result<PathBuf> {
+    if prefix.is_absolute() {
+        Ok(prefix.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(prefix))
+    }
+}
+
+fn schema_candidates(prefix: &Path) -> Vec<PathBuf> {
+    vec![
+        prefix.join(SCHEMA_FILE),
+        prefix.join(APP_DATA_DIR).join(SCHEMA_FILE),
+        prefix.join("share").join(APP_DATA_DIR).join(SCHEMA_FILE),
+    ]
 }
 
 fn resolve_workspace(workspace: &Path) -> Result<PathBuf> {
@@ -158,7 +217,12 @@ fn resolve_db(workspace: &Path, db: &Path) -> PathBuf {
     }
 }
 
-fn index_workspace(workspace: &Path, db: &Path, args: IndexArgs) -> Result<()> {
+fn index_workspace(
+    workspace: &Path,
+    db: &Path,
+    runtime_paths: &RuntimePaths,
+    args: IndexArgs,
+) -> Result<()> {
     let total_started = Instant::now();
     let workspace = fs::canonicalize(workspace)
         .with_context(|| format!("无法解析 workspace: {}", workspace.display()))?;
@@ -177,7 +241,7 @@ fn index_workspace(workspace: &Path, db: &Path, args: IndexArgs) -> Result<()> {
     }
 
     let mut xref_db = XrefDb::create_for_index(db)?;
-    xref_db.reset_schema()?;
+    xref_db.reset_schema(&runtime_paths.schema_path()?)?;
 
     let semantic_started = Instant::now();
     let (symbol_count, ref_count) = index_translation_units(
@@ -230,4 +294,30 @@ fn index_workspace(workspace: &Path, db: &Path, args: IndexArgs) -> Result<()> {
         db.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_default_prefix_is_absolute() {
+        assert!(Path::new(COMPILED_DEFAULT_PREFIX).is_absolute());
+    }
+
+    #[test]
+    fn schema_candidates_support_install_and_data_prefixes() {
+        assert!(
+            schema_candidates(Path::new("/usr"))
+                .contains(&PathBuf::from("/usr/share/xref/schema.sql"))
+        );
+        assert!(
+            schema_candidates(Path::new("/usr/share"))
+                .contains(&PathBuf::from("/usr/share/xref/schema.sql"))
+        );
+        assert!(
+            schema_candidates(Path::new("/usr/share/xref"))
+                .contains(&PathBuf::from("/usr/share/xref/schema.sql"))
+        );
+    }
 }

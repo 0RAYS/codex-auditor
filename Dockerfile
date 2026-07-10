@@ -1,7 +1,7 @@
 FROM ubuntu:26.04
 
 LABEL maintainer="int_barbituric"
-LABEL description="Codex-based code audit / CTF workstation"
+LABEL description="Codex-based code audit"
 
 ARG DEBIAN_FRONTEND=noninteractive
 

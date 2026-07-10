@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 LABEL maintainer="int_barbituric"
 LABEL description="Codex-based code audit / CTF workstation"
@@ -19,46 +19,48 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Python
     python3 python3-pip \
     # Java
-    openjdk-17-jre-headless \
+    default-jre-headless \
     # PHP
-    php8.3-cli php8.3-curl php8.3-xml php8.3-mbstring \
+    php-cli php-curl php-xml php-mbstring \
     # Node.js
     nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. 基础环境
-ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64 /usr/bin/tini
-ADD https://github.com/filebrowser/filebrowser/releases/latest/download/linux-amd64-filebrowser.tar.gz /tmp/fb.tar.gz
-RUN tar -xzf /tmp/fb.tar.gz -C /usr/bin filebrowser && rm /tmp/fb.tar.gz
-RUN chmod +x /usr/bin/ttyd /usr/bin/tini /usr/bin/filebrowser
+RUN curl -fsSL --retry 3 \
+        "https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64" \
+        -o /usr/bin/tini && \
+    curl -fsSL --retry 3 \
+        "https://github.com/filebrowser/filebrowser/releases/latest/download/linux-amd64-filebrowser.tar.gz" \
+        -o /tmp/fb.tar.gz && \
+    tar -xzf /tmp/fb.tar.gz -C /usr/bin filebrowser && \
+    rm /tmp/fb.tar.gz && \
+    chmod +x /usr/bin/ttyd /usr/bin/tini /usr/bin/filebrowser
 
 RUN locale-gen zh_CN.UTF-8 && update-locale LANG=zh_CN.UTF-8
 
 COPY scripts/nginx.conf /etc/nginx/nginx.conf
+COPY scripts/config.toml.template /etc/codex/config.toml.template
 
 # 4. Codex
-RUN npm i -g @openai/codex@latest
+RUN npm install --global @openai/codex@latest && \
+    npm cache clean --force
 
 # 5. Python 常用库 & 审计工具
-RUN pip install --break-system-packages --no-cache-dir \
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
     requests \
     beautifulsoup4 \
-    semgrep
+    semgrep \
+    pip-audit
 
 # 6. 目录结构
 # 根据官方文档, /etc/codex/skills用来存储skills
 RUN mkdir -p /data/workspace /data/codex /data/tools /data/skills /etc/codex
 RUN ln -sfn /data/codex/ /root/.codex
+# 通过官方管理员目录发现 Skills，实际内容保存在可持久化、可修改的 /data/skills
 RUN ln -sfn /data/skills/ /etc/codex/skills
 
-# 7a. 下载审计工具
-ADD https://github.com/frohoff/ysoserial/releases/download/v0.0.6/ysoserial-all.jar \
-    /data/tools/ysoserial.jar
-
-# 7b. 安装 PHP Composer
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/bin --filename=composer
-
-# 7c. 手动构建完工具目录后复制进容器
+# 7. 复制审计工具和技能
 COPY tools/ /data/tools/
 COPY skills/ /data/skills/
 

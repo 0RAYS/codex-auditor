@@ -1,0 +1,12 @@
+model_provider = "docker-env"
+analytics.enabled = false
+feedback.enabled = false
+
+[model_providers.docker-env]
+name = "docker-env"
+base_url = "__OPENAI_BASE_URL__"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+[features]
+multi_agent = true

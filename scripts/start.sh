@@ -19,32 +19,20 @@ fi
 
 # 如果设置了OPENAI_BASE_URL, 并且为首次启动, 则填充, 否则替换
 CODEX_CFG="/data/codex/config.toml"
+CODEX_CFG_TEMPLATE="/etc/codex/config.toml.template"
 if [ -n "${OPENAI_BASE_URL}" ]; then
     if [ ! -f "$CODEX_CFG" ]; then
-        cat > "$CODEX_CFG" << TOML
-model_provider = "docker-env"
-model = "gpt-5.4"
-model_reasoning_effort = "high"
-
-[model_providers.docker-env]
-name = "docker-env"
-base_url = "${OPENAI_BASE_URL}"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
-
-[features]
-multi_agent = true
-
-[[skills.config]]
-path = "/data/skills"
-enabled = true
-TOML
+        sed "s|__OPENAI_BASE_URL__|${OPENAI_BASE_URL}|g" \
+            "$CODEX_CFG_TEMPLATE" > "$CODEX_CFG"
         echo "[+] Generated $CODEX_CFG"
     else
         sed -i "s|^base_url = .*|base_url = \"${OPENAI_BASE_URL}\"|" "$CODEX_CFG"
         echo "[+] Updated base_url in $CODEX_CFG"
     fi
 fi
+
+# Codex 已从 config.toml 读取自定义 provider，避免环境变量触发重复配置警告。
+unset OPENAI_BASE_URL
 
 # 代理（只在非空时写入）
 if [ -n "${PROXY}" ]; then

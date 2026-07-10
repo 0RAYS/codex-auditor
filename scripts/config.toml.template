@@ -10,3 +10,4 @@ wire_api = "responses"
 
 [features]
 multi_agent = true
+memories = false

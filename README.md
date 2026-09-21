@@ -18,6 +18,7 @@ docker run -d \
   -e OPENAI_API_KEY="sk-xxx" \
   -e OPENAI_BASE_URL="https://your.api.dist/v1" \
   -e PASSWORD="yourpassword" \
+  -e OMNIGENT_WS_ALLOWED_ORIGINS="https://codex.example.com" \
   -v codex-data:/data \
   codex-auditor
 ```
@@ -39,6 +40,13 @@ Omnigent 与终端共用此镜像内已经登录的 Codex CLI 和 `/data/codex`
 容器回环地址 `127.0.0.1:6767`，通过现有 Nginx 的 `/codex-ui/`
 路径对外提供访问，不需要 Postgres 或额外容器。
 
+通过公网 HTTPS 反代访问 Omnigent 时，必须设置
+`OMNIGENT_WS_ALLOWED_ORIGINS` 为用户浏览器实际访问的**源**，例如
+`https://codex.example.com`；多个源以英文逗号分隔。它不包含路径，也不带
+结尾 `/`。若 HTTPS 运行在非默认端口，端口也必须写入，例如
+`https://codex.example.com:8443`。该变量会由 supervisord 继承并传给
+Omnigent server，用于放行 WebSocket 和图片/文件上传的 Origin 校验。
+
 ## 环境变量
 
 环境中预装了tui版的cc-switch, 并且持久化到/data目录下, 也不一定需要使用环境变量传递APIKEY. 
@@ -50,6 +58,7 @@ Omnigent 与终端共用此镜像内已经登录的 Codex CLI 和 `/data/codex`
 | `OPENAI_API_KEY` | Codex 使用的 APIKey |
 | `OPENAI_BASE_URL` | API 地址, 格式为https://placeholder.com/v1 |
 | `PASSWORD` | SSH 和终端的 root 密码 (默认为0raysnb) |
+| `OMNIGENT_WS_ALLOWED_ORIGINS` | Omnigent Web UI 的公网 Origin 白名单；例如 `https://codex.example.com`，多个值用逗号分隔 |
 | `PROXY` | HTTP/HTTPS 代理地址 (可选) |
 | `GLOBAL_MIRROR` | 是否使用自带海外 mirrorlist (默认禁用海外源；运行时可设置环境变量，构建时可设置同名 build arg，build arg 仅影响构建期) |
 | `PACMAN_NEW_KEYRING` | 设置后每次启动都生成新本地密钥，需要启用不安全的源时设置 |

@@ -53,10 +53,6 @@ ADD https://github.com/0RAYS/codex-auditor/releases/download/xref-v0.1.1/xref-de
 RUN tar -xzf /tmp/ccs.tar.gz -C /usr/bin cc-switch && rm /tmp/ccs.tar.gz && chmod +x /usr/bin/tini /usr/bin/cc-switch
 RUN pacman -U /tmp/xref*.pkg.tar.zst --noconfirm
 
-RUN uv tool install --python /usr/bin/python "${OMNIGENT_PACKAGE}" && \
-    ln -sfn /root/.local/bin/omnigent /usr/local/bin/omnigent && \
-    ln -sfn /root/.local/bin/omni /usr/local/bin/omni
-
 # 4) 目录结构
 RUN mkdir -p /data/workspace /data/codex /data/omnigent /data/tools /data/cc-switch && \
     ln -sfn /data/codex/ /root/.codex && \
@@ -97,6 +93,11 @@ RUN if [ -n "${GLOBAL_MIRROR:-}" ]; then \
 
 # 9) 写入history便于使用
 RUN echo 'codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5' > /root/.histfile
+
+# 10) 安装 omnigent
+RUN uv tool install --python /usr/bin/python "${OMNIGENT_PACKAGE}" && \
+    ln -sfn /root/.local/bin/omnigent /usr/local/bin/omnigent && \
+    ln -sfn /root/.local/bin/omni /usr/local/bin/omni
 
 EXPOSE 8981 8982
 WORKDIR /data/workspace

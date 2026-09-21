@@ -3,6 +3,9 @@ FROM archlinux:base-devel
 LABEL maintainer="RocketDev"
 LABEL description="Codex-based binary code audit"
 
+# 设置 Omnigent 的版本，默认为最新版，如果要pin版本可以用omnigent==<version>
+ARG OMNIGENT_PACKAGE=omnigent
+
 # 1) pacman 镜像
 COPY mirrorlist /etc/pacman.d/mirrorlist
 COPY archlinuxcn-mirrorlist /etc/pacman.d/archlinuxcn-mirrorlist
@@ -36,6 +39,7 @@ RUN pacman-key --init && \
     pacman -Sy archlinuxcn-keyring archlinux-keyring --noconfirm && \
     pacman -Syu --noconfirm yay filebrowser && \
     pacman -Scc --noconfirm
+
 RUN useradd -m builder && \
     echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 COPY scripts/yay.sh /usr/local/sbin/yay
@@ -49,8 +53,12 @@ ADD https://github.com/0RAYS/codex-auditor/releases/download/xref-v0.1.1/xref-de
 RUN tar -xzf /tmp/ccs.tar.gz -C /usr/bin cc-switch && rm /tmp/ccs.tar.gz && chmod +x /usr/bin/tini /usr/bin/cc-switch
 RUN pacman -U /tmp/xref*.pkg.tar.zst --noconfirm
 
+RUN uv tool install --python /usr/bin/python "${OMNIGENT_PACKAGE}" && \
+    ln -sfn /root/.local/bin/omnigent /usr/local/bin/omnigent && \
+    ln -sfn /root/.local/bin/omni /usr/local/bin/omni
+
 # 4) 目录结构
-RUN mkdir -p /data/workspace /data/codex /data/tools /data/cc-switch && \
+RUN mkdir -p /data/workspace /data/codex /data/omnigent /data/tools /data/cc-switch && \
     ln -sfn /data/codex/ /root/.codex && \
     ln -sfn /data/cc-switch/ /root/.cc-switch
 

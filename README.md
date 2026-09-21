@@ -29,9 +29,15 @@ docker run -d \
 | 方式 | 地址 |
 |---|---|
 | Web 终端 (ttyd) | `http://<host>:8981` |
+| Omnigent Codex Web UI | `http://<host>:8981/codex-ui/` |
 | SSH | `ssh root@<host> -p 8982` |
 
 默认密码通过 `PASSWORD` 环境变量设置，未设置时为 `0raysnb`。
+
+Omnigent 与终端共用此镜像内已经登录的 Codex CLI 和 `/data/codex`
+配置；它的会话数据库与上传附件保存在 `/data/omnigent`。该服务只监听
+容器回环地址 `127.0.0.1:6767`，通过现有 Nginx 的 `/codex-ui/`
+路径对外提供访问，不需要 Postgres 或额外容器。
 
 ## 环境变量
 
@@ -55,6 +61,7 @@ docker run -d \
 ├── workspace/          # 主工作目录
 ├── tools/              # 预置安全工具
 ├── codex/              # Codex 配置持久化
+├── omnigent/           # Omnigent SQLite 会话、附件和 host 状态
 ├── cc-switch/          # cc-switch 配置持久化
 └── custom.sh           # 用户自定义启动脚本（自动 source）
 ```

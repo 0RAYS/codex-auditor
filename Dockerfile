@@ -3,8 +3,8 @@ FROM archlinux:base-devel
 LABEL maintainer="RocketDev"
 LABEL description="Codex-based binary code audit"
 
-# 设置 Omnigent 的版本，默认为最新版，如果要pin版本可以用omnigent==<version>
-ARG OMNIGENT_PACKAGE=omnigent
+# 目前为了支持必要的flag，需要pin到main分支
+ARG OMNIGENT_PACKAGE=git+https://github.com/omnigent-ai/omnigent.git@39807219a599d9029de42dc477c7e9e283135ad9
 
 # 1) pacman 镜像
 COPY mirrorlist /etc/pacman.d/mirrorlist

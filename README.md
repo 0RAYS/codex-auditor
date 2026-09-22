@@ -18,7 +18,7 @@ docker run -d \
   -e OPENAI_API_KEY="sk-xxx" \
   -e OPENAI_BASE_URL="https://your.api.dist/v1" \
   -e PASSWORD="yourpassword" \
-  -e OMNIGENT_WS_ALLOWED_ORIGINS="https://codex.example.com" \
+  -e PUBLIC_HOSTS="codex.example.com" \
   -v codex-data:/data \
   codex-auditor
 ```
@@ -31,6 +31,7 @@ docker run -d \
 |---|---|
 | Web 终端 (ttyd) | `http://<host>:8981` |
 | Omnigent Codex Web UI | `http://<host>:8981/codex-ui/` |
+| DeepSeek Harness Web UI | `http://<host>:8981/dsh/`（按需安装） |
 | SSH | `ssh root@<host> -p 8982` |
 
 默认密码通过 `PASSWORD` 环境变量设置，未设置时为 `0raysnb`。
@@ -40,12 +41,18 @@ Omnigent 与终端共用此镜像内已经登录的 Codex CLI 和 `/data/codex`
 容器回环地址 `127.0.0.1:6767`，通过现有 Nginx 的 `/codex-ui/`
 路径对外提供访问，不需要 Postgres 或额外容器。
 
-通过公网 HTTPS 反代访问 Omnigent 时，必须设置
-`OMNIGENT_WS_ALLOWED_ORIGINS` 为用户浏览器实际访问的**源**，例如
-`https://codex.example.com`；多个源以英文逗号分隔。它不包含路径，也不带
-结尾 `/`。若 HTTPS 运行在非默认端口，端口也必须写入，例如
-`https://codex.example.com:8443`。该变量会由 supervisord 继承并传给
-Omnigent server，用于放行 WebSocket 和图片/文件上传的 Origin 校验。
+通过公网 HTTPS 反代访问 Omnigent 或 DeepSeek Harness 时，设置
+`PUBLIC_HOSTS` 为用户浏览器实际访问的裸 `host[:port]`，例如
+`codex.example.com`。
+
+## DeepSeek Harness（按需安装）
+
+镜像不预装 DeepSeek Harness，且不会自动启动它。如果需要，可以安装
+archlinuxcn 中的 `deepseek-harness` 包，然后使用 `supervisorctl start dsh`
+就可以使用了。
+
+由于 dsh web 启动时需要 token 才能访问，因此会自动跳转到 `/ui/dsh-launch`
+来帮你补上 token。
 
 ## 环境变量
 
@@ -58,7 +65,7 @@ Omnigent server，用于放行 WebSocket 和图片/文件上传的 Origin 校验
 | `OPENAI_API_KEY` | Codex 使用的 APIKey |
 | `OPENAI_BASE_URL` | API 地址, 格式为https://placeholder.com/v1 |
 | `PASSWORD` | SSH 和终端的 root 密码 (默认为0raysnb) |
-| `OMNIGENT_WS_ALLOWED_ORIGINS` | Omnigent Web UI 的公网 Origin 白名单；例如 `https://codex.example.com`，多个值用逗号分隔 |
+| `PUBLIC_HOSTS` | 两个 Web UI 共用的公网裸 host[:port] 白名单；例如 `codex.example.com`，多个值用逗号分隔 |
 | `PROXY` | HTTP/HTTPS 代理地址 (可选) |
 | `GLOBAL_MIRROR` | 是否使用自带海外 mirrorlist (默认禁用海外源；运行时可设置环境变量，构建时可设置同名 build arg，build arg 仅影响构建期) |
 | `PACMAN_NEW_KEYRING` | 设置后每次启动都生成新本地密钥，需要启用不安全的源时设置 |
@@ -71,6 +78,7 @@ Omnigent server，用于放行 WebSocket 和图片/文件上传的 Origin 校验
 ├── tools/              # 预置安全工具
 ├── codex/              # Codex 配置持久化
 ├── omnigent/           # Omnigent SQLite 会话、附件和 host 状态
+├── deepseek-harness/   # 按需安装的 DeepSeek Harness 配置、会话和附件
 ├── cc-switch/          # cc-switch 配置持久化
 └── custom.sh           # 用户自定义启动脚本（自动 source）
 ```

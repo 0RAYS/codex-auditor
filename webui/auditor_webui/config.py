@@ -19,6 +19,8 @@ class Config:
     static_dir: Path
     codex_home: Path
     agents_path: Path
+    dsh_bin: Path
+    dsh_launch_file: Path
     host: str
     port: int
     main_model: str
@@ -54,6 +56,8 @@ def load_config() -> Config:
         static_dir=static_dir,
         codex_home=codex_home,
         agents_path=_env_path("AUDITOR_AGENTS_PATH", codex_home / "AGENTS.md"),
+        dsh_bin=_env_path("DSH_BIN", Path("/usr/bin/dsh")),
+        dsh_launch_file=_env_path("DSH_LAUNCH_FILE", Path("/run/dsh-token")),
         host=os.environ.get("AUDITOR_WEBUI_HOST", "127.0.0.1"),
         port=_env_int("AUDITOR_WEBUI_PORT", 8983),
         main_model=os.environ.get("AUDITOR_MAIN_MODEL", "gpt-5.5"),

@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, redirect, request
 from flask.typing import ResponseReturnValue
 from werkzeug.exceptions import HTTPException
 
@@ -107,6 +108,23 @@ def create_app() -> Flask:
     @app.get("/")
     def index() -> Response:
         return render_index()
+
+    @app.get("/dsh-launch")
+    def dsh_launch() -> Response:
+        """Exchange the current local DSH launch token through the reverse proxy.
+
+        Nginx exposes this as /ui/dsh-launch only after its Basic Auth gate has
+        accepted the request.  This application never returns the token body;
+        it only redirects the browser to the loopback-proxied DSH root.
+        """
+        if not CONFIG.dsh_bin.is_file():
+            return Response("Deepseek Harness is not installed\n", status=503, mimetype="text/plain")
+        try:
+            pid, token = CONFIG.dsh_launch_file.read_text(encoding="utf-8").splitlines()
+            os.kill(int(pid), 0)
+        except (OSError, ValueError):
+            return Response("Deepseek Harness is starting\n", status=503, mimetype="text/plain")
+        return redirect(f"/dsh/?token={token}", code=302)
 
     @app.get("/api/state")
     def api_state() -> ResponseReturnValue:

@@ -71,6 +71,7 @@ COPY configs/supervisord.conf /etc/supervisord.conf
 COPY configs/nginx.conf /etc/nginx/nginx.conf
 COPY scripts/init /init
 COPY scripts/tmux.sh /tmux.sh
+COPY scripts/dsh-web /usr/local/bin/dsh-web
 COPY scripts/sudo.zsh /root/.sudo.zsh
 COPY configs/zshrc /root/.zshrc
 COPY configs/tmux.conf /root/.tmux.conf
@@ -79,7 +80,7 @@ COPY configs/gdbinit /root/.gdbinit
 COPY webui/ /root/webui/
 COPY vim-plugins.tar.zst /tmp/vim-plugins.tar.zst
 COPY configs/AGENTS.md /data/codex/AGENTS.md
-RUN chmod +x /init /tmux.sh && touch /root/.bash_profile && chsh -s /usr/bin/zsh root && \
+RUN chmod +x /init /tmux.sh /usr/local/bin/dsh-web && touch /root/.bash_profile && chsh -s /usr/bin/zsh root && \
     bsdtar -xf /tmp/vim-plugins.tar.zst -C /root
 
 # 7) 清理

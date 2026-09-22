@@ -84,6 +84,16 @@ if [ -f /data/custom.sh ]; then
     source /data/custom.sh || echo "[!] custom.sh failed, continuing..."
 fi
 
+# ---- 5. Webui Origin 设置 ----
+if [ -n "${PUBLIC_HOSTS:-}" ]; then
+    OMNIGENT_WS_ALLOWED_ORIGINS="https://${PUBLIC_HOSTS//,/https://}"
+    export OMNIGENT_WS_ALLOWED_ORIGINS
+    cat >> "$ENV_FILE" << EOF
+export OMNIGENT_WS_ALLOWED_ORIGINS="${OMNIGENT_WS_ALLOWED_ORIGINS}"
+EOF
+    echo "[+] Omnigent allowed origins applied"
+fi
+
 FB_DB="/data/filebrowser.db"
 if [ ! -f "$FB_DB" ]; then
     echo "[+] filebrowser: first run, initializing..."

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +23,8 @@ def app_modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AUDITOR_TEMP_DIR", str(tmp_path / "workspace" / "temp"))
     monkeypatch.setenv("AUDITOR_WEBUI_DB", str(tmp_path / "workspace" / "audit" / "webui.sqlite3"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    monkeypatch.setenv("DSH_BIN", str(tmp_path / "usr" / "bin" / "dsh"))
+    monkeypatch.setenv("DSH_LAUNCH_FILE", str(tmp_path / "run" / "dsh-url"))
     monkeypatch.syspath_prepend(str(WEBUI_ROOT))
     for name in list(sys.modules):
         if name == "auditor_webui" or name.startswith("auditor_webui."):
@@ -139,6 +142,25 @@ def test_target_defaults_running_and_api_starts_default_mining(app_modules, monk
     assert response.get_json()["target"]["last_nonzero_exit_reason"] == ""
     assert started == [payload["session"]["id"]]
     assert stopped == []
+
+
+def test_dsh_launch_requires_installation_then_redirects_with_current_token(app_modules):
+    web = app_modules["web"]
+    client = web.create_app().test_client()
+
+    response = client.get("/dsh-launch")
+    assert response.status_code == 503
+    assert response.get_data(as_text=True) == "Deepseek Harness is not installed\n"
+
+    web.CONFIG.dsh_bin.parent.mkdir(parents=True)
+    web.CONFIG.dsh_bin.touch()
+    web.CONFIG.dsh_launch_file.parent.mkdir(parents=True)
+    token = "a" * 43
+    web.CONFIG.dsh_launch_file.write_text(f"{os.getpid()}\n{token}\n", encoding="utf-8")
+
+    response = client.get("/dsh-launch")
+    assert response.status_code == 302
+    assert response.headers["Location"] == f"/dsh/?token={token}"
 
 
 def test_init_db_marks_dirty_running_sessions_and_runs_interrupted(app_modules):

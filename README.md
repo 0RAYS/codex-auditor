@@ -30,6 +30,8 @@ docker run -d \
 | 方式 | 地址 |
 |---|---|
 | Web 终端 (ttyd) | `http://<host>:8981` |
+| 文件浏览器 | `http://<host>:8981/files/` |
+| 自制 Web UI | `http://<host>:8981/ui/` |
 | Omnigent Codex Web UI | `http://<host>:8981/codex-ui/` |
 | DeepSeek Harness Web UI | `http://<host>:8981/dsh/`（按需安装） |
 | SSH | `ssh root@<host> -p 8982` |

@@ -96,8 +96,6 @@ RUN if [ -n "${GLOBAL_MIRROR:-}" ]; then \
 RUN echo 'codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5' > /root/.histfile
 
 # 10) 安装 omnigent
-# 很遗憾，omnigent 依赖 claude-code
-RUN yay -S --noconfirm claude-code && yay -Scc --noconfirm
 RUN uv tool install --python /usr/bin/python "${OMNIGENT_PACKAGE}" && \
     ln -sfn /root/.local/bin/omnigent /usr/local/bin/omnigent && \
     ln -sfn /root/.local/bin/omni /usr/local/bin/omni

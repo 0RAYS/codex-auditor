@@ -78,7 +78,7 @@ archlinuxcn 中的 `deepseek-harness` 包，然后使用 `supervisorctl start ds
 ├── tools/              # 预置安全工具
 ├── codex/              # Codex 配置持久化
 ├── omnigent/           # Omnigent SQLite 会话、附件和 host 状态
-├── deepseek-harness/   # 按需安装的 DeepSeek Harness 配置、会话和附件
+├── dsh/                # 按需安装的 DeepSeek Harness 配置、会话和附件（链接为 /root/.dsh）
 ├── cc-switch/          # cc-switch 配置持久化
 └── custom.sh           # 用户自定义启动脚本（自动 source）
 ```

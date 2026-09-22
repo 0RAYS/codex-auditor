@@ -77,6 +77,8 @@ archlinuxcn 中的 `deepseek-harness` 包，然后使用 `supervisorctl start ds
 ├── workspace/          # 主工作目录
 ├── tools/              # 预置安全工具
 ├── codex/              # Codex 配置持久化
+├── claude/             # Claude Code 用户配置、认证与本地状态（链接为 /root/.claude）
+├── claude.json         # Claude Code 全局用户配置（链接为 /root/.claude.json）
 ├── omnigent/           # Omnigent SQLite 会话、附件和 host 状态
 ├── dsh/                # 按需安装的 DeepSeek Harness 配置、会话和附件（链接为 /root/.dsh）
 ├── cc-switch/          # cc-switch 配置持久化

@@ -76,9 +76,12 @@ chmod 644 "$ENV_FILE"
 
 # Omnigent local server/runner state.  It lives under the existing /data
 # volume, while its sessions run from the normal shared workspace.
-mkdir -p /data/omnigent /data/workspace /data/dsh
+mkdir -p /data/omnigent /data/workspace /data/dsh /data/claude
 chmod 700 /data/omnigent
+chmod 700 /data/claude
 ln -sfnT /data/dsh /root/.dsh
+ln -sfnT /data/claude /root/.claude
+ln -sfnT /data/claude.json /root/.claude.json
 
 # ---- 4. 用户自定义 ----
 if [ -f /data/custom.sh ]; then

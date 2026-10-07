@@ -32,7 +32,7 @@ docker run -d \
 | Web 终端 (ttyd) | `http://<host>:8981` |
 | 文件浏览器 | `http://<host>:8981/files/` |
 | 自制 Web UI | `http://<host>:8981/ui/` |
-| Omnigent Codex Web UI | `http://<host>:8981/codex-ui/` |
+| Omnigent Codex Web UI | `http://<host>:8981/omnigent/` |
 | DeepSeek Harness Web UI | `http://<host>:8981/dsh/`（按需安装） |
 | SSH | `ssh root@<host> -p 8982` |
 
@@ -40,7 +40,7 @@ docker run -d \
 
 Omnigent 与终端共用此镜像内已经登录的 Codex CLI 和 `/data/codex`
 配置；它的会话数据库与上传附件保存在 `/data/omnigent`。该服务只监听
-容器回环地址 `127.0.0.1:6767`，通过现有 Nginx 的 `/codex-ui/`
+容器回环地址 `127.0.0.1:6767`，通过现有 Nginx 的 `/omnigent/`
 路径对外提供访问，不需要 Postgres 或额外容器。
 
 通过公网 HTTPS 反代访问 Omnigent 或 DeepSeek Harness 时，设置

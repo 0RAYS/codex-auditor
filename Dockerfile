@@ -3,8 +3,7 @@ FROM archlinux:base-devel
 LABEL maintainer="RocketDev"
 LABEL description="Codex-based binary code audit"
 
-# 目前为了支持必要的flag，需要pin到main分支
-ARG OMNIGENT_PACKAGE=git+https://github.com/omnigent-ai/omnigent.git@39807219a599d9029de42dc477c7e9e283135ad9
+ARG OMNIGENT_PACKAGE=omnigent
 
 # 1) pacman 镜像
 COPY mirrorlist /etc/pacman.d/mirrorlist
@@ -37,20 +36,19 @@ RUN sed -i 's/#\(Color\)/\1/;s/^\(NoProgressBar\)/#\1/' /etc/pacman.conf && \
 
 RUN pacman-key --init && \
     pacman -Sy archlinuxcn-keyring archlinux-keyring --noconfirm && \
-    pacman -Syu --noconfirm yay filebrowser && \
+    pacman -Syu --noconfirm yay filebrowser tini && \
     pacman -Scc --noconfirm
 
 RUN useradd -m builder && \
     echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-COPY scripts/yay.sh /usr/local/sbin/yay
-RUN chmod +x /usr/local/sbin/yay
+COPY scripts/yay.sh /usr/local/bin/yay
+RUN chmod +x /usr/local/bin/yay
 
 # 3) 额外二进制工具
 ADD https://github.com/SaladDay/cc-switch-cli/releases/download/v5.8.7/cc-switch-cli-linux-x64-musl.tar.gz /tmp/ccs.tar.gz
-ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64 /usr/bin/tini
 ADD https://github.com/0RAYS/codex-auditor/releases/download/xref-v0.1.1/xref-0.1.1-1-x86_64.pkg.tar.zst /tmp/xref.pkg.tar.zst
 ADD https://github.com/0RAYS/codex-auditor/releases/download/xref-v0.1.1/xref-debug-0.1.1-1-x86_64.pkg.tar.zst /tmp/xref-debug.pkg.tar.zst
-RUN tar -xzf /tmp/ccs.tar.gz -C /usr/bin cc-switch && rm /tmp/ccs.tar.gz && chmod +x /usr/bin/tini /usr/bin/cc-switch
+RUN bsdtar -xf /tmp/ccs.tar.gz -C /usr/bin cc-switch && rm /tmp/ccs.tar.gz && chmod +x /usr/bin/cc-switch
 RUN pacman -U /tmp/xref*.pkg.tar.zst --noconfirm
 
 # 4) 目录结构
@@ -93,7 +91,7 @@ RUN if [ -n "${GLOBAL_MIRROR:-}" ]; then \
     fi
 
 # 9) 写入history便于使用
-RUN echo 'codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5' > /root/.histfile
+RUN echo 'codex --dangerously-bypass-approvals-and-sandbox -m gpt-6-luna' > /root/.histfile
 
 # 10) 安装 omnigent
 RUN uv tool install --python /usr/bin/python "${OMNIGENT_PACKAGE}" && \
